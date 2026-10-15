@@ -11,6 +11,7 @@
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Instant;
 
+use macwin_core::arrange::{Edge, Placement};
 use macwin_core::engine::{
     Action, CloseReason, Engine, EngineConfig, PeerInfo, Timings, TransportRole,
 };
@@ -40,8 +41,9 @@ pub struct SessionConfig {
     pub local_os: Os,
     pub os_version: String,
     pub device_name: String,
-    /// "The peer is to my left/right".
-    pub peer_side: Side,
+    /// Where I placed the peer's screens next to mine; `None` on a secondary
+    /// computer, which follows the placement the primary announces.
+    pub placement: Option<Placement>,
     /// Apply the Ctrl <-> Cmd/Win remap when this machine controls.
     pub remap: bool,
     pub timings: Timings,
@@ -57,6 +59,16 @@ pub struct Backends {
     pub screens: Box<dyn ScreenSource>,
     /// Needed only when the session shares the clipboard.
     pub clipboard: Option<Box<dyn ClipboardBackend>>,
+}
+
+/// The "peer is to my left/right" that peers older than protocol 1.3 read
+/// from a Hello: a placement centred on my outermost screen on that side.
+fn legacy_side(p: Placement) -> Option<Side> {
+    match (p.display, p.edge) {
+        (None, Edge::Left) => Some(Side::Left),
+        (None, Edge::Right) => Some(Side::Right),
+        _ => None,
+    }
 }
 
 /// The Hello a KVM agent sends: it can both control and be controlled
@@ -83,7 +95,8 @@ pub fn kvm_hello(cfg: &SessionConfig, screens: Vec<ScreenInfo>) -> Hello {
         os_version: cfg.os_version.clone(),
         device_name: cfg.device_name.clone(),
         screens,
-        peer_side: Some(cfg.peer_side),
+        peer_side: cfg.placement.and_then(legacy_side),
+        placement: cfg.placement,
         agent_version: env!("CARGO_PKG_VERSION").into(),
     }
 }
@@ -95,6 +108,7 @@ pub fn peer_info(h: &Hello) -> PeerInfo {
         screens: h.screens.clone(),
         capabilities: h.capabilities.clone(),
         device_name: h.device_name.clone(),
+        placement: h.placement,
     }
 }
 
@@ -364,7 +378,7 @@ pub fn spawn_session(
     let engine = Engine::new(EngineConfig {
         local_os: cfg.local_os,
         local_screens,
-        peer_side: cfg.peer_side,
+        placement: cfg.placement,
         remap: cfg.remap,
         timings: cfg.timings,
     })
@@ -374,10 +388,9 @@ pub fn spawn_session(
             PlatformError::Backend(format!("invalid local screens: {e}")),
         )
     })?;
-    if peer.peer_side == Some(cfg.peer_side) {
+    if cfg.placement.is_some() && peer.placement.is_some() {
         warn!(
-            side = ?cfg.peer_side,
-            "both machines place their peer on the same side; check the peer-side settings"
+            "both machines placed the other (both are set up as primary); this machine's own placement is used"
         );
     }
     let (role_tx, role_rx) = watch::channel(RoleKind::Idle);
