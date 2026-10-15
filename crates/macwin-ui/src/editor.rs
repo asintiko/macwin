@@ -303,13 +303,17 @@ fn paint_target(painter: &Painter, pal: &Palette, group: &Group, tf: Transform, 
     }
 }
 
+/// The lines where the cursor crosses: a bright core with a soft glow.
 fn paint_contacts(painter: &Painter, pal: &Palette, contacts: &[arrange::Contact], tf: Transform) {
+    const GLOW: [(f32, u8); 3] = [(14.0, 16), (10.0, 28), (7.0, 56)];
     for c in contacts {
         let (a, b) = (tf.to_canvas(c.from), tf.to_canvas(c.to));
-        painter.line_segment([a, b], Stroke::new(11.0, tint(pal.cross, 48)));
-        painter.line_segment([a, b], Stroke::new(4.5, pal.cross));
-        painter.circle_filled(a, 2.25, pal.cross);
-        painter.circle_filled(b, 2.25, pal.cross);
+        for (width, alpha) in GLOW {
+            painter.line_segment([a, b], Stroke::new(width, tint(pal.cross, alpha)));
+        }
+        painter.line_segment([a, b], Stroke::new(4.0, pal.cross));
+        painter.circle_filled(a, 2.0, pal.cross);
+        painter.circle_filled(b, 2.0, pal.cross);
     }
 }
 
