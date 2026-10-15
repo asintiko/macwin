@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use macwin_agent::driver::{Backends, SessionConfig, SessionEnd};
 use macwin_agent::runner::{Mode, RunDiscovery, RunEvent, RunExit, RunOptions, run};
+use macwin_core::arrange::Placement;
 use macwin_core::engine::Timings;
 use macwin_core::types::{CaptureFault, Os, Rect, ScreenInfo, Side};
 use macwin_net::{Fingerprint, Identity};
@@ -30,7 +31,7 @@ fn session(os: Os, name: &str, side: Side) -> SessionConfig {
         local_os: os,
         os_version: "test".into(),
         device_name: name.into(),
-        peer_side: side,
+        placement: Some(Placement::side(side)),
         remap: true,
         timings: Timings::default(),
         clipboard: None,
