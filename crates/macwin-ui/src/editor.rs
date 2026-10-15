@@ -303,13 +303,17 @@ fn paint_target(painter: &Painter, pal: &Palette, group: &Group, tf: Transform, 
     }
 }
 
+/// The lines where the cursor crosses: a bright core with a soft glow.
 fn paint_contacts(painter: &Painter, pal: &Palette, contacts: &[arrange::Contact], tf: Transform) {
+    const GLOW: [(f32, u8); 3] = [(14.0, 16), (10.0, 28), (7.0, 56)];
     for c in contacts {
         let (a, b) = (tf.to_canvas(c.from), tf.to_canvas(c.to));
-        painter.line_segment([a, b], Stroke::new(11.0, tint(pal.cross, 48)));
-        painter.line_segment([a, b], Stroke::new(4.5, pal.cross));
-        painter.circle_filled(a, 2.25, pal.cross);
-        painter.circle_filled(b, 2.25, pal.cross);
+        for (width, alpha) in GLOW {
+            painter.line_segment([a, b], Stroke::new(width, tint(pal.cross, alpha)));
+        }
+        painter.line_segment([a, b], Stroke::new(4.0, pal.cross));
+        painter.circle_filled(a, 2.0, pal.cross);
+        painter.circle_filled(b, 2.0, pal.cross);
     }
 }
 
@@ -447,13 +451,6 @@ impl EditorState {
         if let Some(active) = self.active {
             if let Some((_, at)) = active.target {
                 paint_target(&painter, pal, moving, tf, at);
-                let preview = canvas::group_at(&moving.screens, at);
-                paint_contacts(
-                    &painter,
-                    pal,
-                    &canvas::crossings(&anchor.screens, &preview),
-                    tf,
-                );
             }
             let look = Look {
                 alpha: 215,
@@ -461,6 +458,11 @@ impl EditorState {
                 grip: false,
             };
             paint_moving(&painter, pal, moving, tf, active.want, look);
+            if let Some((_, at)) = active.target {
+                let preview = canvas::group_at(&moving.screens, at);
+                let crossings = canvas::crossings(&anchor.screens, &preview);
+                paint_contacts(&painter, pal, &crossings, tf);
+            }
         } else {
             let now = ctx.input(|i| i.time);
             let mut origin = committed;
@@ -473,13 +475,13 @@ impl EditorState {
                     ctx.request_repaint();
                 }
             }
-            paint_contacts(&painter, pal, &scene.contacts, tf);
             let look = Look {
                 alpha: 255,
                 lift: false,
                 grip: p.editable,
             };
             paint_moving(&painter, pal, moving, tf, origin, look);
+            paint_contacts(&painter, pal, &scene.contacts, tf);
         }
         dropped
     }
