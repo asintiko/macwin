@@ -23,6 +23,7 @@ use tracing::{debug, info, warn};
 pub use crate::heartbeat::{HEARTBEAT_INTERVAL, HEARTBEAT_TIMEOUT};
 pub use crate::layout::EDGE_REENTRY_INSET;
 
+use crate::arrange::{Placement, resolve};
 use crate::geometry::ScreenSet;
 use crate::heartbeat::HeartbeatMonitor;
 use crate::keys::{ButtonSet, Pressed};
@@ -35,7 +36,7 @@ use crate::os::pixels_to_notch120;
 use crate::remap::Remap;
 use crate::types::{
     CaptureFault, CapturedEvent, GeometryError, GrabCommand, Hid, InjectCommand, ModifierMask, Os,
-    PointF, RoleKind, ScreenInfo, Side, WheelUnit,
+    PointF, RoleKind, ScreenInfo, WheelUnit,
 };
 use session::{Controlled, Controlling, LocalInput, Role, Session};
 
@@ -78,8 +79,10 @@ impl Default for Timings {
 pub struct EngineConfig {
     pub local_os: Os,
     pub local_screens: Vec<ScreenInfo>,
-    /// "The peer is to my left/right".
-    pub peer_side: Side,
+    /// Where I placed the peer's screens next to mine: `Some` on the primary
+    /// computer (or for a legacy left/right setting), `None` on a secondary,
+    /// which follows the placement in the peer's Hello.
+    pub placement: Option<Placement>,
     /// Apply the Ctrl <-> Cmd/Win remap as a controller.
     pub remap: bool,
     pub timings: Timings,
@@ -99,6 +102,9 @@ pub struct PeerInfo {
     pub screens: Vec<ScreenInfo>,
     pub capabilities: Vec<String>,
     pub device_name: String,
+    /// Where the peer placed my screens next to its own, if it is the
+    /// primary computer.
+    pub placement: Option<Placement>,
 }
 
 /// Result of a local input event.
@@ -136,7 +142,7 @@ pub enum CloseReason {
 pub struct Engine {
     local_os: Os,
     local: ScreenSet,
-    peer_side: Side,
+    placement: Option<Placement>,
     remap_enabled: bool,
     timings: Timings,
     input: LocalInput,
@@ -182,7 +188,7 @@ fn release_target(c: &mut Controlled, actions: &mut Vec<Action>) {
     );
 }
 
-/// Ends the current role: Controlling ungrabs at `inset(exit)` (optionally
+/// Ends the current role: Controlling ungrabs at `inset(exit, exit_edge)` (optionally
 /// telling the peer with a Leave first), Controlled releases everything it
 /// injected. The role becomes Idle.
 fn leave_role(
@@ -198,7 +204,7 @@ fn leave_role(
                 actions.push(Action::SendInput(InputMsg::Leave(Leave { epoch: c.epoch })));
             }
             actions.push(Action::Capture(GrabCommand::Release {
-                warp_to: s.layout.inset(c.exit),
+                warp_to: s.layout.inset(c.exit, c.exit_edge),
             }));
             end_controlling(input, &c);
             info!(epoch = c.epoch, "stopped controlling the peer");
@@ -215,7 +221,7 @@ impl Engine {
         Ok(Engine {
             local_os: cfg.local_os,
             local: ScreenSet::new(cfg.local_screens)?,
-            peer_side: cfg.peer_side,
+            placement: cfg.placement,
             remap_enabled: cfg.remap,
             timings: cfg.timings,
             input: LocalInput::default(),
@@ -263,8 +269,16 @@ impl Engine {
                 return actions;
             }
         };
+        // My own placement wins; a secondary mirrors the primary's.
+        let map = self
+            .placement
+            .map(|p| resolve(&self.local, &peer_screens, &p))
+            .or_else(|| {
+                peer.placement
+                    .map(|p| resolve(&peer_screens, &self.local, &p).inverse())
+            });
         let session = Session {
-            layout: Layout::new(self.local.clone(), peer_screens, self.peer_side),
+            layout: Layout::new(self.local.clone(), peer_screens, map),
             remap: Remap::new(self.local_os, peer.os, self.remap_enabled),
             parity: match role {
                 TransportRole::Dialer => 1,
@@ -427,12 +441,12 @@ impl Engine {
             return swallow(Vec::new());
         }
         match ev {
-            CapturedEvent::MouseMove { pos, .. } => self.try_enter(now, pos),
+            CapturedEvent::MouseMove { pos, delta } => self.try_enter(now, pos, delta),
             _ => deliver(Vec::new()),
         }
     }
 
-    fn try_enter(&mut self, now: Instant, pos: PointF) -> LocalOutcome {
+    fn try_enter(&mut self, now: Instant, pos: PointF, delta: PointF) -> LocalOutcome {
         let Some(s) = self.session.as_mut() else {
             return deliver(Vec::new());
         };
@@ -443,7 +457,7 @@ impl Engine {
         {
             return deliver(Vec::new());
         }
-        let Some(crossing) = s.layout.try_enter(pos) else {
+        let Some(crossing) = s.layout.try_enter(pos, delta) else {
             return deliver(Vec::new());
         };
         let epoch = s.next_epoch();
@@ -464,6 +478,7 @@ impl Engine {
             epoch,
             v: crossing.entry,
             exit: crossing.exit,
+            exit_edge: crossing.edge,
             npl_src: crossing.npl_src,
             pre_grab: self.input.keys.difference(&self.input.held_from_remote),
             fwd_buttons: ButtonSet::new(),
