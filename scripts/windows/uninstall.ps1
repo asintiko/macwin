@@ -102,6 +102,15 @@ Get-Process -Name 'macwin', 'macwin-tray' -ErrorAction SilentlyContinue |
 Remove-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'macwin' `
     -ErrorAction SilentlyContinue
 
+# The Start menu entry, only when it opens this installation.
+$shortcut = Join-Path ([Environment]::GetFolderPath('Programs')) 'MacWin.lnk'
+if (Test-Path -LiteralPath $shortcut -PathType Leaf) {
+    $target = (New-Object -ComObject WScript.Shell).CreateShortcut($shortcut).TargetPath
+    if ($target -and (Test-PathWithinFolder $target $Destination)) {
+        Remove-Item -LiteralPath $shortcut -Force
+    }
+}
+
 if (Get-NetFirewallRule -Group 'macwin' -ErrorAction SilentlyContinue) {
     $rules = "Remove-NetFirewallRule -Group 'macwin' -ErrorAction SilentlyContinue"
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()

@@ -26,6 +26,10 @@
 	<string>15.0</string>
 	<key>LSUIElement</key>
 	<true/>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSSupportsAutomaticGraphicsSwitching</key>
+	<true/>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>MacWin connects to your other computer on the local network to share the mouse, keyboard and clipboard.</string>
 	<key>NSBonjourServices</key>
