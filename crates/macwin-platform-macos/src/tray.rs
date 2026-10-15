@@ -253,19 +253,18 @@ impl Target {
     }
 }
 
-/// Runs the menu bar item on the main thread until the app has finished;
-/// then the process exits.
-pub fn run(app: Arc<dyn TrayApp>) -> Result<(), PlatformError> {
+/// Installs the menu bar item into the application on the main thread,
+/// whose run loop someone else runs (the app window's event loop). It lives
+/// until the process exits, which it ends once the app has finished.
+pub fn install(app: Arc<dyn TrayApp>) -> Result<(), PlatformError> {
     let mtm = MainThreadMarker::new()
         .ok_or_else(|| PlatformError::Backend("the tray must run on the main thread".into()))?;
-    let ns_app = NSApplication::sharedApplication(mtm);
-    // A menu bar app without a Dock icon, also outside MacWin.app.
-    ns_app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
     let target = Target::new(mtm, app);
     target.on_tick();
     let receiver: &AnyObject = &target;
-    // SAFETY: `tick:` is implemented by `Target`, which the timer retains;
-    // the common modes constant is a valid run loop mode.
+    // SAFETY: `tick:` is implemented by `Target`, which the timer retains
+    // (and the run loop retains the timer); the common modes constant is a
+    // valid run loop mode.
     unsafe {
         let timer = NSTimer::timerWithTimeInterval_target_selector_userInfo_repeats(
             TRAY_POLL.as_secs_f64(),
@@ -276,6 +275,18 @@ pub fn run(app: Arc<dyn TrayApp>) -> Result<(), PlatformError> {
         );
         NSRunLoop::mainRunLoop().addTimer_forMode(&timer, NSRunLoopCommonModes);
     }
+    Ok(())
+}
+
+/// Runs the menu bar item on the main thread until the app has finished;
+/// then the process exits.
+pub fn run(app: Arc<dyn TrayApp>) -> Result<(), PlatformError> {
+    let mtm = MainThreadMarker::new()
+        .ok_or_else(|| PlatformError::Backend("the tray must run on the main thread".into()))?;
+    let ns_app = NSApplication::sharedApplication(mtm);
+    // A menu bar app without a Dock icon, also outside MacWin.app.
+    ns_app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+    install(app)?;
     ns_app.run();
     Ok(())
 }
