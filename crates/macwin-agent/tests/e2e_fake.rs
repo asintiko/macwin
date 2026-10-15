@@ -442,6 +442,32 @@ async fn shutdown_while_controlling_releases_the_peer() {
     assert_eq!(b.injector.unmatched_ups(), 0);
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn dropping_session_handle_stops_capture_and_releases_the_peer() {
+    let (a, b) = start().await;
+    a_controls_b(&a, &b).await;
+    assert!(!a.capture.emit(key(KEY_A, true)));
+    wait_until("B holds KeyA", || {
+        b.injector.pressed_keys().contains(&KEY_A)
+    })
+    .await;
+
+    drop(a.handle);
+
+    wait_until("A capture stopped", || {
+        a.capture.stopped() && a.capture.backend_dropped()
+    })
+    .await;
+    assert!(matches!(
+        a.capture.commands().last(),
+        Some(GrabCommand::Release { .. })
+    ));
+    wait_until("B released", || b.injector.pressed_keys().is_empty()).await;
+    let b_end = tokio::time::timeout(T, b.handle.join()).await.unwrap();
+    assert_eq!(b_end, SessionEnd::PeerClosed);
+    assert_eq!(b.injector.unmatched_ups(), 0);
+}
+
 fn with_clipboard(mut c: SessionConfig, max: usize) -> SessionConfig {
     c.clipboard = sharing(max);
     c

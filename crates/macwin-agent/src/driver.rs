@@ -130,7 +130,8 @@ impl Stopper {
     }
 }
 
-/// A running session.
+/// A running session. Dropping the handle requests shutdown; use
+/// [`join`](Self::join) to wait for cleanup.
 pub struct SessionHandle {
     /// The current role, updated after every Engine step.
     pub role: watch::Receiver<RoleKind>,
@@ -156,14 +157,20 @@ impl SessionHandle {
     }
 
     /// Waits for the session to end.
-    pub async fn join(self) -> SessionEnd {
-        self.join
+    pub async fn join(mut self) -> SessionEnd {
+        (&mut self.join)
             .await
             .unwrap_or_else(|e| SessionEnd::Internal(format!("driver task failed: {e}")))
     }
 
     pub fn is_finished(&self) -> bool {
         self.join.is_finished()
+    }
+}
+
+impl Drop for SessionHandle {
+    fn drop(&mut self) {
+        self.shutdown.notify_one();
     }
 }
 

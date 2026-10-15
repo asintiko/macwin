@@ -128,6 +128,18 @@ impl Agent {
     fn last_capture(&self) -> FakeCaptureHandle {
         self.captures.lock().unwrap().last().unwrap().clone()
     }
+
+    async fn last_started_capture(&self) -> FakeCaptureHandle {
+        let capture = self.last_capture();
+        tokio::time::timeout(T, async {
+            while !capture.started() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the latest capture backend did not start");
+        capture
+    }
 }
 
 fn connected(e: &RunEvent) -> bool {
@@ -203,7 +215,9 @@ async fn reconnects_after_the_peer_restarts_and_stops_on_the_chord() {
     pc2.expect("connected", connected).await;
 
     // 3. The emergency chord on the Mac ends its loop; the PC keeps listening.
-    mac.last_capture().emit_fault(CaptureFault::EmergencyChord);
+    mac.last_started_capture()
+        .await
+        .emit_fault(CaptureFault::EmergencyChord);
     mac.expect("emergency end", |e| {
         matches!(e, RunEvent::Ended(SessionEnd::EmergencyStop))
     })
@@ -232,6 +246,45 @@ async fn a_stop_while_dialing_exits_promptly() {
         .await;
     mac.stop.send(true).unwrap();
     assert_eq!(mac.finish().await, RunExit::Stopped);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn aborting_a_connected_runner_stops_its_session() {
+    let mac_id = Identity::generate().unwrap();
+    let pc_id = Identity::generate().unwrap();
+    let addr: SocketAddr = format!("127.0.0.1:{}", free_port()).parse().unwrap();
+    let mut pc = listening(addr, &pc_id, mac_id.fingerprint()).await;
+    let mut mac = start(
+        session(Os::MacOs, "mac", Side::Right),
+        Mode::Dial(addr.to_string()),
+        mac_id,
+        pc_id.fingerprint(),
+    );
+
+    mac.expect("connected", connected).await;
+    pc.expect("connected", connected).await;
+    let capture = mac.last_started_capture().await;
+
+    mac.task.abort();
+    let error = tokio::time::timeout(T, mac.task)
+        .await
+        .expect("runner did not abort")
+        .unwrap_err();
+    assert!(error.is_cancelled());
+    tokio::time::timeout(T, async {
+        while !capture.backend_dropped() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("aborting the runner left its session capture alive");
+
+    pc.expect("peer closed", |e| {
+        matches!(e, RunEvent::Ended(SessionEnd::PeerClosed))
+    })
+    .await;
+    pc.stop.send(true).unwrap();
+    assert_eq!(pc.finish().await, RunExit::Stopped);
 }
 
 #[tokio::test(flavor = "multi_thread")]
