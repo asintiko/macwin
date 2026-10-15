@@ -6,9 +6,10 @@ use std::time::{Duration, Instant};
 use proptest::prelude::*;
 
 use super::*;
+use crate::arrange::{Edge, Placement};
 use crate::geometry::tests::screen;
 use crate::msg::{CAP_INPUT_CAPTURE, Hello, Ping};
-use crate::types::{MouseButton, Point};
+use crate::types::{MouseButton, Point, Side};
 
 const MS: Duration = Duration::from_millis(1);
 const KEY_A: Hid = Hid(0x07_0004);
@@ -22,11 +23,21 @@ fn win_screens(npl: f64) -> Vec<ScreenInfo> {
     vec![screen(7, 0, 0, 1920, 1080, npl)]
 }
 
+/// An engine whose placement of the peer is the legacy left/right `side`.
 fn engine_with(os: Os, screens: Vec<ScreenInfo>, side: Side, remap: bool) -> Engine {
+    engine_placing(os, screens, Some(Placement::side(side)), remap)
+}
+
+fn engine_placing(
+    os: Os,
+    screens: Vec<ScreenInfo>,
+    placement: Option<Placement>,
+    remap: bool,
+) -> Engine {
     Engine::new(EngineConfig {
         local_os: os,
         local_screens: screens,
-        peer_side: side,
+        placement,
         remap,
         timings: Timings::default(),
     })
@@ -39,6 +50,7 @@ fn peer_with(os: Os, screens: Vec<ScreenInfo>, caps: &[&str]) -> PeerInfo {
         screens,
         capabilities: caps.iter().map(|c| c.to_string()).collect(),
         device_name: "peer".into(),
+        placement: None,
     }
 }
 
@@ -1070,6 +1082,7 @@ fn ping_is_answered_on_its_channel_and_late_hello_is_a_violation() {
         device_name: String::new(),
         screens: win_screens(1.0),
         peer_side: None,
+        placement: None,
         agent_version: String::new(),
     };
     assert_eq!(
