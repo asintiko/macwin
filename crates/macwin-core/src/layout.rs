@@ -334,12 +334,17 @@ mod tests {
         );
     }
 
+    /// `p` is exactly `x` across a vertical edge (the inset is exact) and
+    /// within a unit of `y` along it (the mapping is subject to rounding).
     #[track_caller]
-    fn assert_within(p: Point, x: i32, y: i32, slack: i32) {
-        assert!(
-            (p.x - x).abs() <= slack && (p.y - y).abs() <= slack,
-            "{p:?} is not within {slack} of ({x}, {y})"
-        );
+    fn assert_warp_x(p: Point, x: i32, y: i32) {
+        assert!(p.x == x && (p.y - y).abs() <= 1, "{p:?} is not ({x}, ~{y})");
+    }
+
+    /// The same across a horizontal edge.
+    #[track_caller]
+    fn assert_warp_y(p: Point, x: i32, y: i32) {
+        assert!(p.y == y && (p.x - x).abs() <= 1, "{p:?} is not (~{x}, {y})");
     }
 
     #[test]
@@ -488,13 +493,13 @@ mod tests {
         let l = desk();
         let right_edge = pt(2303.0, 750.0);
         match l.step(right_edge, pt(5.0, 0.0), 1.0, false) {
-            Step::Exited { warp_to } => assert_within(warp_to, 2, 500, 1),
+            Step::Exited { warp_to } => assert_warp_x(warp_to, 2, 500),
             other => panic!("expected exit, got {other:?}"),
         }
         // Up through the laptop's top edge, onto the wide monitor.
         let top_edge = pt(1854.0, 0.0);
         match l.step(top_edge, pt(0.0, -5.0), 1.0, false) {
-            Step::Exited { warp_to } => assert_within(warp_to, -300, -3, 1),
+            Step::Exited { warp_to } => assert_warp_y(warp_to, -300, -3),
             other => panic!("expected exit, got {other:?}"),
         }
         // Not while a button is held.
@@ -533,12 +538,12 @@ mod tests {
 
         // Back out of the MacBook's left edge (laptop pixels: 6 -> 4 points).
         match l.step(pt(0.5, 500.0), pt(-6.0, 0.0), 1.5, false) {
-            Step::Exited { warp_to } => assert_within(warp_to, 2301, 750, 1),
+            Step::Exited { warp_to } => assert_warp_x(warp_to, 2301, 750),
             other => panic!("expected exit, got {other:?}"),
         }
         // And out of the wide monitor's bottom edge into the laptop's top.
         match l.step(pt(-300.0, -1.0), pt(0.0, 6.0), 1.5, false) {
-            Step::Exited { warp_to } => assert_within(warp_to, 1854, 2, 1),
+            Step::Exited { warp_to } => assert_warp_y(warp_to, 1854, 2),
             other => panic!("expected exit, got {other:?}"),
         }
         // The MacBook's left edge below the laptop leads nowhere.
@@ -688,7 +693,7 @@ mod tests {
             other => panic!("expected a move, got {other:?}"),
         }
         match l.step(pt(600.0, 1079.0), pt(0.0, 5.0), 1.0, false) {
-            Step::Exited { warp_to } => assert_within(warp_to, 100 + 400, 2, 1),
+            Step::Exited { warp_to } => assert_warp_y(warp_to, 100 + 400, 2),
             other => panic!("expected exit, got {other:?}"),
         }
 
@@ -704,7 +709,7 @@ mod tests {
         assert_near(c.entry, (500.5 - 80.0) * 1.5, 0.0);
         assert!(l.try_enter(pt(500.0, 0.0), pt(0.0, -5.0)).is_none());
         match l.step(pt(600.0, 0.0), pt(0.0, -5.0), 1.0, false) {
-            Step::Exited { warp_to } => assert_within(warp_to, 80 + 400, 897, 1),
+            Step::Exited { warp_to } => assert_warp_y(warp_to, 80 + 400, 897),
             other => panic!("expected exit, got {other:?}"),
         }
     }
