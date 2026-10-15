@@ -24,11 +24,12 @@ if [[ -z "${RUSTUP_TOOLCHAIN:-}" ]] && command -v rustup >/dev/null; then
 fi
 
 VERSION="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)"
-cargo build --release -p macwin-agent
+cargo build --locked --release -p macwin-agent
 
 rm -rf "$APP"
-mkdir -p "$APP/Contents/MacOS"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp target/release/macwin "$APP/Contents/MacOS/macwin"
+cp "$ROOT/THIRD_PARTY_NOTICES" "$APP/Contents/Resources/THIRD_PARTY_NOTICES"
 sed "s/@VERSION@/$VERSION/g" scripts/macos/Info.plist.in >"$APP/Contents/Info.plist"
 plutil -lint "$APP/Contents/Info.plist" >/dev/null
 

@@ -23,6 +23,38 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 
+function Get-NormalizedDirectoryPath([string]$Path) {
+    $provider = $null
+    $drive = $null
+    $providerPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath(
+        $Path, [ref]$provider, [ref]$drive)
+    if ($null -eq $provider -or $provider.Name -ne 'FileSystem') {
+        throw "Destination must resolve to a filesystem path, not '$($provider.Name)'."
+    }
+    $fullPath = [IO.Path]::GetFullPath($providerPath)
+    $root = [IO.Path]::GetPathRoot($fullPath)
+    if ($fullPath.Length -gt $root.Length) {
+        $separators = [char[]]@([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+        $fullPath = $fullPath.TrimEnd($separators)
+    }
+    $fullPath
+}
+
+function Test-SameDirectoryPath([string]$Path, [string]$OtherPath) {
+    $comparison = [StringComparison]::OrdinalIgnoreCase
+    if (-not [IO.Path]::IsPathRooted($Path) -or -not [IO.Path]::IsPathRooted($OtherPath)) {
+        return [string]::Equals($Path, $OtherPath, $comparison)
+    }
+    try {
+        [string]::Equals((Get-NormalizedDirectoryPath $Path),
+            (Get-NormalizedDirectoryPath $OtherPath), $comparison)
+    } catch {
+        [string]::Equals($Path, $OtherPath, $comparison)
+    }
+}
+
+$Destination = Get-NormalizedDirectoryPath $Destination
+
 $programs = 'macwin.exe', 'macwin-tray.exe'
 foreach ($exe in $programs) {
     if (-not (Test-Path (Join-Path $Source $exe))) {
@@ -78,7 +110,14 @@ if (-not $NoPath) {
             $kind = [Microsoft.Win32.RegistryValueKind]::String
         }
         $parts = @($raw -split ';' | Where-Object { $_ })
-        if ($parts -notcontains $Destination) {
+        $pathContainsDestination = $false
+        foreach ($part in $parts) {
+            if (Test-SameDirectoryPath $part $Destination) {
+                $pathContainsDestination = $true
+                break
+            }
+        }
+        if (-not $pathContainsDestination) {
             $envKey.SetValue('Path', (($parts + $Destination) -join ';'), $kind)
             Send-SettingChange
             Write-Host 'Added to PATH: new terminals know `macwin`.'

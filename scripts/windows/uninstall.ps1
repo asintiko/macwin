@@ -27,9 +27,40 @@ function Get-DefaultDestination([string]$ScriptRoot) {
     }
 }
 
+function Get-NormalizedDirectoryPath([string]$Path) {
+    $provider = $null
+    $drive = $null
+    $providerPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath(
+        $Path, [ref]$provider, [ref]$drive)
+    if ($null -eq $provider -or $provider.Name -ne 'FileSystem') {
+        throw "Destination must resolve to a filesystem path, not '$($provider.Name)'."
+    }
+    $fullPath = [IO.Path]::GetFullPath($providerPath)
+    $root = [IO.Path]::GetPathRoot($fullPath)
+    if ($fullPath.Length -gt $root.Length) {
+        $separators = [char[]]@([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+        $fullPath = $fullPath.TrimEnd($separators)
+    }
+    $fullPath
+}
+
+function Test-SameDirectoryPath([string]$Path, [string]$OtherPath) {
+    $comparison = [StringComparison]::OrdinalIgnoreCase
+    if (-not [IO.Path]::IsPathRooted($Path) -or -not [IO.Path]::IsPathRooted($OtherPath)) {
+        return [string]::Equals($Path, $OtherPath, $comparison)
+    }
+    try {
+        [string]::Equals((Get-NormalizedDirectoryPath $Path),
+            (Get-NormalizedDirectoryPath $OtherPath), $comparison)
+    } catch {
+        [string]::Equals($Path, $OtherPath, $comparison)
+    }
+}
+
 if (-not $PSBoundParameters.ContainsKey('Destination')) {
     $Destination = Get-DefaultDestination $PSScriptRoot
 }
+$Destination = Get-NormalizedDirectoryPath $Destination
 
 function Send-SettingChange {
     # Removing a variable that does not exist changes nothing, but .NET still broadcasts
@@ -96,7 +127,7 @@ if ($envKey) {
         $raw = [string]$envKey.GetValue('Path', '',
             [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
         $parts = @($raw -split ';' | Where-Object { $_ })
-        $kept = @($parts | Where-Object { $_ -ne $Destination })
+        $kept = @($parts | Where-Object { -not (Test-SameDirectoryPath $_ $Destination) })
         if ($kept.Count -ne $parts.Count) {
             if ($kept.Count) {
                 $envKey.SetValue('Path', ($kept -join ';'), $envKey.GetValueKind('Path'))

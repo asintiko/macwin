@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Builds target/MacWin-<version>.dmg: MacWin.app (built and signed by
-# bundle.sh) next to a link to /Applications to drag it onto.
+# bundle.sh), first-launch instructions, and a link to /Applications.
 #
 #   scripts/macos/dmg.sh             # builds the app first
 #   scripts/macos/dmg.sh --no-build  # packs the existing target/MacWin.app
@@ -27,6 +27,7 @@ STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
 # ditto keeps the bundle's signature and extended attributes intact.
 ditto "$APP" "$STAGE/MacWin.app"
+cp "$ROOT/scripts/macos/first-launch.txt" "$STAGE/First Launch.txt"
 ln -s /Applications "$STAGE/Applications"
 rm -f "$DMG"
 hdiutil create -volname "MacWin $VERSION" -srcfolder "$STAGE" -fs HFS+ -format UDZO -ov "$DMG" >/dev/null

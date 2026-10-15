@@ -40,8 +40,8 @@ jobs:
         run: cargo run -p keymap-gen --locked -- --check
 
   # Builds the release packages and smoke-tests them: the dmg mounts and holds
-  # a validly signed app; the Windows zip installs (files, Run key, firewall
-  # rules) and uninstalls without leftovers. The packages stay as artifacts.
+  # a validly signed app; the Windows zip installs, updates and uninstalls while
+  # preserving unrelated files. The packages stay as artifacts.
   package:
     name: package (${{ matrix.os }})
     strategy:
@@ -68,6 +68,8 @@ jobs:
           mnt="$(mktemp -d)"
           hdiutil attach -nobrowse -readonly -mountpoint "$mnt" target/MacWin-*.dmg
           test -L "$mnt/Applications"
+          test -f "$mnt/First Launch.txt"
+          test -f "$mnt/MacWin.app/Contents/Resources/THIRD_PARTY_NOTICES"
           codesign --verify --strict --verbose=2 "$mnt/MacWin.app"
           "$mnt/MacWin.app/Contents/MacOS/macwin" --version
           hdiutil detach "$mnt"
@@ -92,13 +94,24 @@ jobs:
             $parts = $raw -split ';'
             if ($envKey.GetValueKind('Path') -ne [Microsoft.Win32.RegistryValueKind]::ExpandString) { throw "PATH lost its type: $raw" }
             if ($parts -notcontains $marker) { throw "PATH lost an unexpanded entry: $raw" }
-            if (($parts -contains $dest) -ne $installed) { throw "unexpected PATH: $raw" }
+            $expectedCount = if ($installed) { 1 } else { 0 }
+            if (@($parts | Where-Object { $_ -eq $dest }).Count -ne $expectedCount) { throw "unexpected PATH: $raw" }
           }
           $stage = Join-Path $env:RUNNER_TEMP 'stage'
           Expand-Archive -Path (Get-Item target/macwin-*-windows-x64.zip) -DestinationPath $stage
           $installer = Get-ChildItem $stage -Recurse -Filter install.ps1 | Select-Object -First 1
           $dest = Join-Path $env:RUNNER_TEMP 'macwin custom install'
-          & $installer.FullName -Destination $dest -NoStart
+          & $installer.FullName -Destination "$dest\" -NoStart
+          Assert-UserPath $true
+          $userFile = Join-Path $dest 'notes.txt'
+          Set-Content -LiteralPath $userFile -Value 'keep my file'
+          Push-Location -LiteralPath $env:RUNNER_TEMP
+          try {
+            & $installer.FullName -Destination '.\macwin custom install\' -NoStart
+          } finally {
+            Pop-Location
+          }
+          if ((Get-Content -LiteralPath $userFile) -ne 'keep my file') { throw 'update changed an unrelated file' }
           Assert-UserPath $true
           $run = (Get-ItemProperty $runKey).macwin
           if ($run -ne "`"$dest\macwin-tray.exe`"") { throw "unexpected Run value: $run" }
@@ -110,9 +123,15 @@ jobs:
             -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$dest\uninstall.ps1`""
           if ($p.ExitCode -ne 0) { throw "uninstall.ps1 failed with exit code $($p.ExitCode)" }
           Assert-UserPath $false
-          if (Test-Path $dest) { throw 'the program folder is left' }
+          foreach ($file in 'macwin.exe', 'macwin-tray.exe', 'uninstall.ps1', 'README.txt', 'THIRD_PARTY_NOTICES') {
+            if (Test-Path -LiteralPath (Join-Path $dest $file)) { throw "program file left after uninstall: $file" }
+          }
+          if ((Get-Content -LiteralPath $userFile) -ne 'keep my file') { throw 'uninstall changed an unrelated file' }
+          Remove-Item -LiteralPath $userFile
+          Remove-Item -LiteralPath $dest
           if ((Get-ItemProperty $runKey).macwin) { throw 'the Run value is left' }
           if (Get-NetFirewallRule -Group 'macwin' -ErrorAction SilentlyContinue) { throw 'firewall rules are left' }
+          $envKey.Close()
       - uses: actions/upload-artifact@v7.0.2
         with:
           name: macwin-${{ runner.os }}

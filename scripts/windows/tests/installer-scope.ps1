@@ -42,6 +42,58 @@ try {
                 throw "Unexpected folder match for '$($case.Path)' against '$base'"
             }
         }
+
+        . (Get-FunctionScriptBlock $script 'Get-NormalizedDirectoryPath')
+        $expectedPath = [IO.Path]::GetFullPath($base)
+        $trailingSeparatorPath = $base + [IO.Path]::DirectorySeparatorChar
+        if ((Get-NormalizedDirectoryPath $trailingSeparatorPath) -ne $expectedPath) {
+            throw "A trailing separator was not normalized in $script"
+        }
+        $root = [IO.Path]::GetPathRoot($expectedPath)
+        if ((Get-NormalizedDirectoryPath $root) -ne $root) {
+            throw "A filesystem root was changed in $script"
+        }
+        . (Get-FunctionScriptBlock $script 'Test-SameDirectoryPath')
+        if (-not (Test-SameDirectoryPath $trailingSeparatorPath $expectedPath)) {
+            throw "Equivalent absolute paths were not matched in $script"
+        }
+        if (Test-SameDirectoryPath ($base + '-old') $expectedPath) {
+            throw "A sibling directory was treated as the same path in $script"
+        }
+        if (Test-SameDirectoryPath '%USERPROFILE%\Programs\macwin' $expectedPath) {
+            throw "An unrelated PATH variable was treated as the same path in $script"
+        }
+
+        $nonFileSystemPathRejected = $false
+        try { Get-NormalizedDirectoryPath 'Env:PATH' | Out-Null } catch { $nonFileSystemPathRejected = $true }
+        if (-not $nonFileSystemPathRejected) {
+            throw "A non-filesystem provider path was accepted in $script"
+        }
+
+        $oldCurrentDirectory = [Environment]::CurrentDirectory
+        $dotNetCurrentDirectory = Join-Path $tempRoot 'dotnet-current'
+        New-Item -ItemType Directory -Path $dotNetCurrentDirectory -Force | Out-Null
+        $locationPushed = $false
+        try {
+            Push-Location -LiteralPath $tempRoot
+            $locationPushed = $true
+            [Environment]::CurrentDirectory = $dotNetCurrentDirectory
+            if ([string]::Equals((Get-Location).ProviderPath, [Environment]::CurrentDirectory,
+                    [StringComparison]::OrdinalIgnoreCase)) {
+                throw 'The test must keep PowerShell and .NET current directories different.'
+            }
+            $separator = [IO.Path]::DirectorySeparatorChar
+            $relativePath = ".${separator}nested${separator}..${separator}macwin${separator}"
+            if ((Get-NormalizedDirectoryPath $relativePath) -ne $expectedPath) {
+                throw "A relative path was not normalized in $script"
+            }
+        } finally {
+            try {
+                if ($locationPushed) { Pop-Location }
+            } finally {
+                [Environment]::CurrentDirectory = $oldCurrentDirectory
+            }
+        }
     }
 
     . (Get-FunctionScriptBlock $uninstallScript 'Get-DefaultDestination')

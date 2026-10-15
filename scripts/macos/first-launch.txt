@@ -1,0 +1,24 @@
+MacWin — first launch
+
+Requires macOS 15.0 or later.
+
+Install MacWin.app in Applications before opening it. This build is not
+notarized for distribution, so Gatekeeper may block the first launch. Continue
+only if you trust this app and its source; overriding this warning can expose
+your Mac to malware. Prefer an App Store version or a trusted alternative if
+you are unsure.
+
+If you trust this build and macOS blocks it, try opening MacWin.app once. Then
+go to System Settings > Privacy & Security, scroll to Security, and choose
+Open Anyway for MacWin. Authenticate if asked, then confirm Open. The button
+is available for about an hour after the blocked launch attempt. See Apple's
+instructions: https://support.apple.com/guide/mac-help/open-a-mac-app-from-an-unknown-developer-mh40616/mac
+
+Allow Local Network access when macOS asks. To share keyboard and mouse,
+enable MacWin under System Settings > Privacy & Security > Accessibility and
+Input Monitoring. If macOS asks for clipboard access, allow MacWin under
+Paste from Other Apps.
+
+This package is not universal: bundle.sh builds the default Rust target of
+the build Mac. Use an arm64 build for Apple silicon or an x86_64 build for
+Intel Macs.
