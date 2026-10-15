@@ -33,6 +33,8 @@ cp "$ROOT/scripts/macos/first-launch.txt" "$STAGE/First Launch.txt"
 ln -s /Applications "$STAGE/Applications"
 rm -f "$DMG"
 hdiutil create -volname "MacWin $VERSION" -srcfolder "$STAGE" -fs HFS+ -format UDZO -ov "$DMG" >/dev/null
-codesign --force --timestamp=none --sign "${MACWIN_SIGN_IDENTITY:--}" "$DMG"
+if [[ -n "${MACWIN_SIGN_IDENTITY:-}" && "${MACWIN_SIGN_IDENTITY}" != "-" ]]; then
+    codesign --force --timestamp=none --sign "$MACWIN_SIGN_IDENTITY" "$DMG"
+fi
 hdiutil verify "$DMG" >/dev/null
 echo "built $DMG"

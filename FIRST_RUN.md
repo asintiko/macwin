@@ -24,13 +24,23 @@
 
 **MacBook**
 
-1. Откройте DMG и запустите **`Install MacWin.command`** (он автоматически скопирует
+1. В macOS 15 Sequoia браузер (Safari/Chrome) ставит на скачанный `.dmg` карантинную метку
+   `com.apple.quarantine`, из-за чего при двойном клике по `.dmg` без платной нотаризации Apple
+   появляется окно *«Файл MacWin-0.1.0-macos-arm64.dmg не был открыт»*.
+   Самый быстрый способ установить и запустить без единого предупреждения — выполнить одну
+   команду в **Терминале** (`Terminal.app`):
+   ```sh
+   curl -fsSL https://github.com/kojikor/macwin/releases/download/v0.1.0-test.1/install-macos.sh | bash
+   ```
+   *(Этот скрипт сам подхватит уже скачанный в «Загрузки» `MacWin*.dmg`, снимет с него карантин,
+   установит `MacWin.app` в `/Applications`, подпишет локально и запустит).*
+   Либо если хотите просто разблокировать уже скачанный `.dmg` в папке «Загрузки»:
+   ```sh
+   xattr -cr ~/Downloads/MacWin*.dmg && open ~/Downloads/MacWin*.dmg
+   ```
+   и внутри открывшегося окна запустите **`Install MacWin.command`** (он автоматически скопирует
    `MacWin.app` в `/Applications`, снимет карантинный атрибут `com.apple.quarantine`
    и переподпишет бандл локально, чтобы macOS не выдавала окно «Не удалось проверить MacWin»).
-   Либо перенесите `MacWin.app` в `Applications` вручную и выполните в Терминале:
-   ```sh
-   xattr -cr /Applications/MacWin.app && codesign --force --deep --sign - /Applications/MacWin.app && open /Applications/MacWin.app
-   ```
 2. Откройте приложение. В **Системные настройки → Конфиденциальность и безопасность**
    разрешите ему **Универсальный доступ**, **Мониторинг ввода** и **Локальную сеть**,
    если macOS запрашивает эти разрешения. Если система отдельно спрашивает о

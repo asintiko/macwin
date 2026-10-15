@@ -15,6 +15,7 @@
 включая проверку отсутствия внешнего Visual C++ Runtime у Windows EXE.
 
 - [DMG для Apple Silicon, macOS 15+ (с `Install MacWin.command`, без окна «Не удалось проверить»)](https://github.com/kojikor/macwin/releases/download/v0.1.0-test.1/MacWin-0.1.0-macos-arm64.dmg).
+- [Однострочный установщик для macOS 15+ (`install-macos.sh` — обходит блокировку `.dmg` браузерным карантином)](https://github.com/kojikor/macwin/releases/download/v0.1.0-test.1/install-macos.sh).
 - [Прямой Windows x64 EXE без архива (`MacWin-0.1.0-windows-x64.exe`)](https://github.com/kojikor/macwin/releases/download/v0.1.0-test.1/MacWin-0.1.0-windows-x64.exe).
 - [Windows x64 ZIP с обоими EXE и `install.cmd`](https://github.com/kojikor/macwin/releases/download/v0.1.0-test.1/macwin-0.1.0-windows-x64.zip).
 - [Контрольные суммы SHA-256](https://github.com/kojikor/macwin/releases/download/v0.1.0-test.1/SHA256SUMS.txt).
