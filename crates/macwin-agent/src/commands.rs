@@ -323,7 +323,13 @@ pub async fn run() -> anyhow::Result<()> {
         .side
         .context("tell macwin where the peer's screens are: macwin config set side left|right")?;
     let staging = staging_dir()?;
-    let session = session_config(&config, os, device_name(), side, staging);
+    let session = session_config(
+        &config,
+        os,
+        device_name(),
+        Some(Placement::side(side)),
+        staging,
+    );
     let with_clipboard = session.clipboard.is_some();
     let sharing = match &session.clipboard {
         None => "off".to_string(),
@@ -467,7 +473,7 @@ pub fn session_config(
     config: &Config,
     os: macwin_core::types::Os,
     device_name: String,
-    side: Side,
+    placement: Option<Placement>,
     staging: PathBuf,
 ) -> SessionConfig {
     let c = &config.clipboard;
@@ -475,7 +481,7 @@ pub fn session_config(
         local_os: os,
         os_version: String::new(),
         device_name,
-        peer_side: side,
+        placement,
         remap: config.remap,
         timings: Timings::default(),
         clipboard: c.enabled.then(|| ClipboardSettings {
@@ -814,7 +820,7 @@ pub async fn spike_kvm(args: SpikeKvmArgs) -> anyhow::Result<()> {
         local_os: os,
         os_version: String::new(),
         device_name: device_name(),
-        peer_side: args.peer_side.into(),
+        placement: Some(Placement::side(args.peer_side.into())),
         remap: !args.no_remap,
         timings: Timings::default(),
         clipboard: None,
