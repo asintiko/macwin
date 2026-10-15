@@ -4,14 +4,18 @@ A software KVM for one Mac and one Windows PC on the same LAN: either
 machine's keyboard and mouse can drive both screens, and copied text,
 images and files are shared between them.
 
-**Status: Phase 3.** Pairing by a one-time code (the machines find each
-other on the LAN), the identity key in the macOS Keychain / Windows DPAPI,
-keyboard and mouse sharing with smooth trackpad scrolling, clipboard sharing
-of text, images and files, automatic reconnects, a menu bar / notification
-area app, start at login and installable packages are implemented with
-automated tests. Native CI builds and smoke-tests the macOS and Windows packages;
-the real OS backends and the tray UI still need testing on physical hardware.
+**Status: 0.2 in progress.** On top of Phase 3 (pairing by a one-time code,
+Keychain / DPAPI identity, keyboard and mouse sharing with smooth scrolling,
+clipboard sharing of text, images and files, reconnects, start at login,
+installable packages), MacWin becomes a normal application: a window with a
+first-run wizard (this computer is the **primary** or the **secondary**), a
+drag-and-drop screen arrangement editor that places the other computer next to
+any of your monitors on any edge, and pairing by entering the secondary's code
+on the primary. The menu bar / notification area icon stays for quick access.
+Native CI builds and smoke-tests the packages; the real OS backends and the
+window still need testing on physical hardware.
 
+Plan and per-stage status: [PLAN.md](PLAN.md) and issue [#10](https://github.com/asintiko/macwin/issues/10) (Russian).
 Current progress, verification results and remaining work: [PROGRESS.md](PROGRESS.md) (Russian).
 First-run instructions and the hardware checklist: [FIRST_RUN.md](FIRST_RUN.md) (Russian).
 Test downloads: [v0.1.0-test.1](https://github.com/kojikor/macwin/releases/tag/v0.1.0-test.1).
@@ -22,13 +26,14 @@ and `install.cmd`. These are test builds, without distribution signing/notarizat
 
 | Path | What it is |
 |---|---|
-| `crates/macwin-core` | Pure logic: vocabulary types, edge-mapping geometry, HID keymap, Ctrl/Cmd remap, pressed-key tracking, heartbeat, emergency chord, the controller state machine (`Engine`), clipboard sync ordering. No I/O, threads or clocks. |
+| `crates/macwin-core` | Pure logic: vocabulary types, screen arrangement (placement, snapping, shared edges) and edge crossing, HID keymap, Ctrl/Cmd remap, pressed-key tracking, heartbeat, emergency chord, the controller state machine (`Engine`), clipboard sync ordering. No I/O, threads or clocks. |
 | `crates/macwin-proto` | Strict protobuf codec (hand-written `prost` derives, no `protoc`), stream framing, version check. |
 | `crates/macwin-net` | QUIC (quinn + rustls/ring) with mutual TLS and SHA-256 certificate pinning; SPAKE2 pairing; identity bundles; the `Link` abstraction. |
 | `crates/macwin-platform` | Backend traits (capture, injection, screens, clipboard, secret store), the tray view model, and in-memory fakes (`testing` feature). |
 | `crates/macwin-platform-macos` | macOS backend: CGEventTap capture, CGEventPost injection, displays, NSPasteboard, login keychain, menu bar item (empty on other OSes). |
 | `crates/macwin-platform-windows` | Windows backend: low-level hooks, SendInput, per-monitor-v2 DPI, Win32 clipboard, DPAPI, `Run` key, notification area icon (empty on other OSes). |
-| `crates/macwin-agent` | Session driver, reconnecting runner, LAN discovery use, tray controller, config (library) and the `macwin` / `macwin-tray` binaries. |
+| `crates/macwin-ui` | The application window (egui/eframe with OpenGL): first-run wizard, arrangement editor, status and settings. Talks to the agent through its `Backend` trait; `examples/demo.rs` runs it with a fake backend. |
+| `crates/macwin-agent` | Session driver, reconnecting runner, LAN discovery use, the controller behind the window and the tray, config (library) and the `macwin` / `macwin-tray` binaries. |
 | `scripts/macos` | Builds and signs `target/MacWin.app`, packs it into a dmg, runs it through LaunchServices, stops it. |
 | `scripts/windows` | Builds the Windows zip; `install.ps1` / `uninstall.ps1` inside it. |
 | `tools/keymap-gen` | Generates the HID <-> macOS keycode <-> Windows scancode table from Chromium data. |
@@ -90,18 +95,28 @@ Gatekeeper and SmartScreen warn on first launch.
 
 ## Usage
 
-The tray app (MacWin.app in the menu bar, `macwin-tray.exe` in the Windows
-notification area, or `macwin tray`) does everything below from its menu.
-The same works from the command line; on a Mac, run commands through the
-signed app bundle (`scripts/macos/run.sh <command>`, see below) so that macOS
-grants its permissions and keychain access to MacWin.app.
+Open MacWin (MacWin.app, the Start menu entry or `macwin-tray.exe`, or
+`macwin app`): the window does everything below. Closing it keeps MacWin
+running in the menu bar / notification area; **Open MacWin…** in the icon's menu
+(on Windows also a click on the icon, or launching MacWin again) brings it back.
+At login MacWin starts in the background without a window (`macwin tray`,
+`macwin-tray.exe --background`). The same works from the command line; on a
+Mac, run commands through the signed app bundle (`scripts/macos/run.sh
+<command>`, see below) so that macOS grants its permissions and keychain access
+to MacWin.app.
 
 ### 1. Pair the machines (once)
 
-In the menu of one machine choose **Pair with another computer…**: it shows
-a code. On the other machine choose **Enter pairing code…** and type it.
-The machines find each other on the local network; then choose where the
-other machine's screens are (**Other computer is on the left / right**).
+On the computer whose keyboard and mouse you want to use, choose **Primary**
+in the first-run wizard. The next step shows your monitors as they are arranged
+in the OS; drag the other computer to where it stands on the desk (it snaps to
+the nearest monitor edge; the highlighted line is where the cursor will cross)
+and continue. On the other computer choose **Secondary**: it shows a code.
+Enter that code on the primary. The secondary receives the arrangement from the
+primary with every connection, so it never asks for a side, and its own mouse
+can cross back through the same edge. The arrangement can be changed later on
+the primary's **Arrangement** tab, which then shows the other computer's real
+screens.
 
 Discovery uses IPv4 broadcast and may not cross VPNs, subnets or Wi-Fi client
 isolation. If it fails, enter the address and code from the other machine's
