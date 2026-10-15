@@ -261,7 +261,7 @@ fn splash(ui: &mut egui::Ui, cx: &Cx<'_>, text: &str) {
     egui::CentralPanel::default().show(ui, |ui| {
         ui.with_layout(Layout::top_down(Align::Center), |ui| {
             ui.add_space((ui.available_height() / 2.0 - 40.0).max(0.0));
-            ui.add(egui::Spinner::new().size(32.0).color(cx.pal.accent));
+            widgets::spinner(ui, &cx.pal, 34.0);
             ui.add_space(14.0);
             widgets::paragraph(ui, text, 16.0, cx.pal.muted, Align::Center);
             ui.allocate_space(vec2(0.0, 0.0));
@@ -301,4 +301,22 @@ pub fn run(backend: Arc<dyn Backend>, options: RunOptions) -> Result<(), eframe:
         native,
         Box::new(move |cc| Ok(Box::new(MacWinApp::new(cc, backend, options)))),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_window_handle_may_travel_between_threads() {
+        fn ok<T: Send + Sync + Clone + 'static>() {}
+        ok::<WindowControl>();
+    }
+
+    #[test]
+    fn default_options_open_a_normal_window() {
+        let o = RunOptions::default();
+        assert!(!o.start_hidden && !o.hide_on_close);
+        assert!(o.on_start.is_none() && o.on_visibility.is_none());
+    }
 }
