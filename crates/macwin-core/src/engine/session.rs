@@ -2,6 +2,7 @@
 
 use std::time::Instant;
 
+use crate::arrange::Edge;
 use crate::heartbeat::HeartbeatMonitor;
 use crate::keys::{ButtonSet, KeySet, Pressed};
 use crate::layout::Layout;
@@ -33,6 +34,8 @@ pub(crate) struct Controlling {
     pub(crate) v: PointF,
     /// Where the local cursor is parked.
     pub(crate) exit: Point,
+    /// The side of my screen the cursor left through.
+    pub(crate) exit_edge: Edge,
     pub(crate) npl_src: f64,
     /// Keys the local OS saw go down before the grab.
     pub(crate) pre_grab: KeySet,
