@@ -1,8 +1,10 @@
 //! Small painted widgets shared by the wizard and the main window.
 
+use std::time::Duration;
+
 use eframe::egui::{
-    self, Align, Color32, CornerRadius, CursorIcon, FontId, InnerResponse, Layout, Margin, Rect,
-    Response, RichText, Sense, Stroke, StrokeKind, Ui, UiBuilder, pos2, vec2,
+    self, Align, Color32, CornerRadius, CursorIcon, FontId, InnerResponse, Layout, Margin, Pos2,
+    Rect, Response, RichText, Sense, Stroke, StrokeKind, Ui, UiBuilder, pos2, vec2,
 };
 
 use crate::theme::{Palette, Tone, tint};
@@ -16,8 +18,6 @@ pub enum Btn {
     Secondary,
     /// A destructive action.
     Danger,
-    /// A quiet action without a frame.
-    Ghost,
 }
 
 /// `c` with its channels scaled by `k` (opaque colours only).
@@ -68,11 +68,6 @@ pub fn button_sized(ui: &mut Ui, pal: &Palette, text: &str, kind: Btn, min_width
                 tint(pal.tone(Tone::Bad), (hover * 34.0) as u8),
                 Stroke::new(1.0, pal.tone(Tone::Bad)),
                 pal.tone(Tone::Bad),
-            ),
-            Btn::Ghost => (
-                tint(pal.muted, (hover * 40.0) as u8),
-                Stroke::NONE,
-                pal.muted.lerp_to_gamma(pal.text, hover),
             ),
         };
         let radius = CornerRadius::same(9);
@@ -176,12 +171,15 @@ pub fn paragraph(ui: &mut Ui, text: &str, size: f32, color: Color32, align: Alig
     ui.add(egui::Label::new(RichText::new(text).size(size).color(color)).halign(align))
 }
 
-/// A status pill: a dot and a text on a tinted background.
-pub fn pill(ui: &mut Ui, pal: &Palette, tone: Tone, text: &str) -> Response {
+/// A status pill: a dot and a text on a tinted background, at most
+/// `max_width` wide (a longer text is cut with an ellipsis).
+pub fn pill(ui: &mut Ui, pal: &Palette, tone: Tone, text: &str, max_width: f32) -> Response {
     let fg = pal.tone(tone);
-    let galley = ui
-        .painter()
-        .layout_no_wrap(text.to_owned(), FontId::proportional(15.0), fg);
+    let mut job = LayoutJob::simple_singleline(text.to_owned(), FontId::proportional(15.0), fg);
+    job.wrap.max_width = (max_width - 40.0).max(40.0);
+    job.wrap.max_rows = 1;
+    job.wrap.break_anywhere = true;
+    let galley = ui.painter().layout_job(job);
     let size = vec2(galley.size().x + 22.0 + 18.0, 32.0);
     let (rect, resp) = ui.allocate_exact_size(size, Sense::hover());
     if ui.is_rect_visible(rect) {
@@ -374,6 +372,59 @@ pub fn toggle_row(
     changed
 }
 
+/// Paints a spinning arc in `rect` and schedules the next frame (about 30 a
+/// second, which is plenty for a spinner and spares the CPU).
+pub fn paint_spinner(ui: &Ui, pal: &Palette, rect: Rect) {
+    let c = rect.center();
+    let width = (rect.width() / 9.0).clamp(2.0, 3.5);
+    let r = rect.width().min(rect.height()) / 2.0 - width;
+    let painter = ui.painter();
+    painter.circle_stroke(c, r, Stroke::new(width, tint(pal.accent, 45)));
+    let start = (ui.input(|i| i.time) * 5.0) as f32;
+    let sweep = std::f32::consts::PI * 1.3;
+    let steps = 24;
+    let points: Vec<Pos2> = (0..=steps)
+        .map(|i| {
+            let a = start + sweep * i as f32 / steps as f32;
+            c + vec2(a.cos(), a.sin()) * r
+        })
+        .collect();
+    painter.add(egui::Shape::line(points, Stroke::new(width, pal.accent)));
+    ui.ctx().request_repaint_after(Duration::from_millis(33));
+}
+
+/// A spinner of `size` points.
+pub fn spinner(ui: &mut Ui, pal: &Palette, size: f32) -> Response {
+    let (rect, resp) = ui.allocate_exact_size(vec2(size, size), Sense::hover());
+    if ui.is_rect_visible(rect) {
+        paint_spinner(ui, pal, rect);
+    }
+    resp
+}
+
+/// A round "×" button; `hint` is its tooltip.
+pub fn close_button(ui: &mut Ui, pal: &Palette, hint: &str) -> Response {
+    let (rect, resp) = ui.allocate_exact_size(vec2(28.0, 28.0), Sense::click());
+    if ui.is_rect_visible(rect) {
+        let hover = ui
+            .ctx()
+            .animate_bool_with_time(resp.id, resp.hovered(), 0.12);
+        let painter = ui.painter();
+        painter.circle_filled(rect.center(), 14.0, tint(pal.muted, (hover * 50.0) as u8));
+        let color = pal.muted.lerp_to_gamma(pal.text, hover);
+        let d = 4.5;
+        let c = rect.center();
+        for (a, b) in [(vec2(-d, -d), vec2(d, d)), (vec2(-d, d), vec2(d, -d))] {
+            painter.line_segment([c + a, c + b], Stroke::new(1.8, color));
+        }
+        if resp.has_focus() {
+            focus_ring(ui, pal, rect, 14);
+        }
+    }
+    resp.on_hover_text(hint)
+        .on_hover_cursor(CursorIcon::PointingHand)
+}
+
 /// A dismissible banner; returns true when its close button was clicked.
 pub fn banner(
     ui: &mut Ui,
@@ -394,7 +445,7 @@ pub fn banner(
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
-                let text_w = (ui.available_width() - 110.0).max(100.0);
+                let text_w = (ui.available_width() - 44.0).max(100.0);
                 ui.allocate_ui_with_layout(vec2(text_w, 0.0), Layout::top_down(Align::Min), |ui| {
                     ui.set_width(text_w);
                     ui.spacing_mut().item_spacing.y = 2.0;
@@ -405,8 +456,8 @@ pub fn banner(
                         ui.label(RichText::new(message).size(14.0).color(pal.text));
                     }
                 });
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if button(ui, pal, close, Btn::Ghost).clicked() {
+                ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
+                    if close_button(ui, pal, close).clicked() {
                         dismissed = true;
                     }
                 });
