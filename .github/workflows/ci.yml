@@ -116,6 +116,17 @@ jobs:
           $run = (Get-ItemProperty $runKey).macwin
           if ($run -ne "`"$dest\macwin-tray.exe`"") { throw "unexpected Run value: $run" }
           if (@(Get-NetFirewallRule -Group 'macwin').Count -ne 2) { throw 'firewall rules missing' }
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          $vs = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          $dumpbin = Get-ChildItem "$vs\VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe" | Select-Object -First 1 -ExpandProperty FullName
+          if (-not $dumpbin) { throw 'dumpbin is required to check package dependencies' }
+          foreach ($binary in 'macwin.exe', 'macwin-tray.exe') {
+            $imports = & $dumpbin /DEPENDENTS (Join-Path $dest $binary)
+            if ($LASTEXITCODE -ne 0) { throw "dumpbin failed for $binary" }
+            if ($imports -match '\b(?:vcruntime|msvcp|concrt)\d\S*\.dll\b') {
+              throw "$binary requires a separately installed Visual C++ runtime"
+            }
+          }
           & "$dest\macwin.exe" autostart status
           if ($LASTEXITCODE -ne 0) { throw 'macwin autostart status failed' }
           # From inside the folder it removes, as "Run with PowerShell" starts it.

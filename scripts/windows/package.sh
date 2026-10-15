@@ -22,6 +22,10 @@ if [[ -z "${RUSTUP_TOOLCHAIN:-}" ]] && command -v rustup >/dev/null; then
 fi
 
 VERSION="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)"
+if [[ "$TARGET" == *-windows-msvc ]]; then
+    # The package must not require a separate Visual C++ redistributable.
+    export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C target-feature=+crt-static"
+fi
 cargo build --release --locked -p macwin-agent --target "$TARGET"
 
 NAME="macwin-$VERSION-windows-x64"
