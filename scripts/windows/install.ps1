@@ -4,10 +4,11 @@ Installs macwin for the current user.
 
 .DESCRIPTION
 Copies macwin.exe and macwin-tray.exe to %LOCALAPPDATA%\Programs\macwin, adds
-that folder to the user's PATH, starts the tray at login (`macwin autostart
-on`), allows macwin through Windows Firewall (UDP 47800 for sessions and
-pairing, 47801 for discovery; Windows asks for administrator rights once) and
-starts the tray. Running it again updates an existing installation.
+that folder to the user's PATH and MacWin to the Start menu, starts MacWin in
+the background at login (`macwin autostart on`), allows macwin through Windows
+Firewall (UDP 47800 for sessions and pairing, 47801 for discovery; Windows asks
+for administrator rights once) and opens the MacWin window. Running it again
+updates an existing installation.
 #>
 [CmdletBinding()]
 param(
@@ -19,6 +20,7 @@ param(
     [switch]$NoFirewall,
     [switch]$NoAutostart,
     [switch]$NoPath,
+    [switch]$NoShortcut,
     [switch]$NoStart
 )
 $ErrorActionPreference = 'Stop'
@@ -95,6 +97,17 @@ foreach ($file in $programs + 'uninstall.ps1', 'README.txt', 'THIRD_PARTY_NOTICE
     }
 }
 Write-Host "Installed in $Destination"
+
+if (-not $NoShortcut) {
+    # The Start menu entry opens the window like any other program.
+    $shortcut = Join-Path ([Environment]::GetFolderPath('Programs')) 'MacWin.lnk'
+    $link = (New-Object -ComObject WScript.Shell).CreateShortcut($shortcut)
+    $link.TargetPath = Join-Path $Destination 'macwin-tray.exe'
+    $link.WorkingDirectory = $Destination
+    $link.Description = 'MacWin: one keyboard and mouse for your Mac and PC'
+    $link.Save()
+    Write-Host "Added to the Start menu: $shortcut"
+}
 
 if (-not $NoPath) {
     # The raw value and its type (normally REG_EXPAND_SZ), so entries like

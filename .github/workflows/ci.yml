@@ -116,7 +116,10 @@ jobs:
           if ((Get-Content -LiteralPath $userFile) -ne 'keep my file') { throw 'update changed an unrelated file' }
           Assert-UserPath $true
           $run = (Get-ItemProperty $runKey).macwin
-          if ($run -ne "`"$dest\macwin-tray.exe`"") { throw "unexpected Run value: $run" }
+          if ($run -ne "`"$dest\macwin-tray.exe`" --background") { throw "unexpected Run value: $run" }
+          $shortcut = Join-Path ([Environment]::GetFolderPath('Programs')) 'MacWin.lnk'
+          $target = (New-Object -ComObject WScript.Shell).CreateShortcut($shortcut).TargetPath
+          if ($target -ne "$dest\macwin-tray.exe") { throw "unexpected Start menu shortcut: $target" }
           if (@(Get-NetFirewallRule -Group 'macwin').Count -ne 2) { throw 'firewall rules missing' }
           $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
           $vs = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
@@ -143,6 +146,7 @@ jobs:
           Remove-Item -LiteralPath $userFile
           Remove-Item -LiteralPath $dest
           if ((Get-ItemProperty $runKey).macwin) { throw 'the Run value is left' }
+          if (Test-Path -LiteralPath $shortcut) { throw 'the Start menu shortcut is left' }
           if (Get-NetFirewallRule -Group 'macwin' -ErrorAction SilentlyContinue) { throw 'firewall rules are left' }
           $envKey.Close()
       - uses: actions/upload-artifact@v7.0.2
