@@ -9,11 +9,14 @@ other on the LAN), the identity key in the macOS Keychain / Windows DPAPI,
 keyboard and mouse sharing with smooth trackpad scrolling, clipboard sharing
 of text, images and files, automatic reconnects, a menu bar / notification
 area app, start at login and installable packages are implemented with
-automated fake-backend tests. Current native CI results are not yet confirmed;
-the real OS backends and the tray UI still need testing on hardware.
+automated tests. Native CI builds and smoke-tests the macOS and Windows packages;
+the real OS backends and the tray UI still need testing on physical hardware.
 
 Current progress, verification results and remaining work: [PROGRESS.md](PROGRESS.md) (Russian).
 First-run instructions and the hardware checklist: [FIRST_RUN.md](FIRST_RUN.md) (Russian).
+Test downloads: [GitHub Releases](https://github.com/kojikor/macwin/releases).
+The DMG requires macOS 15+ on Apple Silicon; the Windows ZIP contains x64 EXEs
+and `install.cmd`. These are test builds, without distribution signing/notarization.
 
 ## Workspace
 
