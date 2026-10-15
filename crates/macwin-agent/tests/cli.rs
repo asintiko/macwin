@@ -161,6 +161,10 @@ fn config_of(dir: &Path) -> String {
 }
 
 #[test]
+#[cfg_attr(
+    not(any(target_os = "macos", target_os = "windows")),
+    ignore = "CLI peers require macOS or Windows"
+)]
 fn two_processes_pair_with_a_code() {
     let mac = tempfile::tempdir().unwrap();
     let pc = tempfile::tempdir().unwrap();
@@ -243,6 +247,10 @@ fn free_udp_port() -> u16 {
 }
 
 #[test]
+#[cfg_attr(
+    not(any(target_os = "macos", target_os = "windows")),
+    ignore = "CLI peers require macOS or Windows"
+)]
 fn pairing_with_only_the_code_finds_the_waiting_machine() {
     let mac = tempfile::tempdir().unwrap();
     let pc = tempfile::tempdir().unwrap();
@@ -301,11 +309,42 @@ fn pairing_with_only_the_code_finds_the_waiting_machine() {
 }
 
 #[test]
+#[cfg_attr(
+    not(any(target_os = "macos", target_os = "windows")),
+    ignore = "CLI peers require macOS or Windows"
+)]
 fn run_without_a_pairing_explains_what_to_do() {
     let dir = tempfile::tempdir().unwrap();
     let out = macwin(dir.path()).arg("run").output().unwrap();
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("not paired yet"));
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+#[test]
+fn platform_commands_reject_unsupported_hosts() {
+    let dir = tempfile::tempdir().unwrap();
+    let commands: &[&[&str]] = &[
+        &["pair", "--listen", "127.0.0.1:0"],
+        &["run"],
+        &[
+            "spike",
+            "net",
+            "--listen",
+            "127.0.0.1:0",
+            "--peer-fp",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+        ],
+    ];
+    for args in commands {
+        let out = macwin(dir.path()).args(*args).output().unwrap();
+        assert!(!out.status.success(), "{args:?}: {out:?}");
+        assert!(
+            String::from_utf8_lossy(&out.stderr)
+                .contains("unsupported OS: macwin runs on macOS and Windows"),
+            "{args:?}: {out:?}"
+        );
+    }
 }
 
 /// Starts a listener and returns it with its bound address.
@@ -341,6 +380,10 @@ fn start_listener(config: &Path, peer_fp: &str) -> (Guard, String) {
 }
 
 #[test]
+#[cfg_attr(
+    not(any(target_os = "macos", target_os = "windows")),
+    ignore = "CLI peers require macOS or Windows"
+)]
 fn spike_net_between_two_processes() {
     let a = tempfile::tempdir().unwrap();
     let b = tempfile::tempdir().unwrap();
@@ -387,6 +430,10 @@ fn spike_net_between_two_processes() {
 }
 
 #[test]
+#[cfg_attr(
+    not(any(target_os = "macos", target_os = "windows")),
+    ignore = "CLI peers require macOS or Windows"
+)]
 fn dialer_with_a_wrong_pin_fails_quickly() {
     let a = tempfile::tempdir().unwrap();
     let b = tempfile::tempdir().unwrap();
