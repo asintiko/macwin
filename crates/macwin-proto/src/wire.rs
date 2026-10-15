@@ -291,6 +291,27 @@ pub struct Hello {
     pub peer_side: i32,
     #[prost(string, tag = "8")]
     pub agent_version: String,
+    /// Where the sender placed the receiver's screens next to its own; only
+    /// the primary computer sets it.
+    #[prost(message, optional, tag = "9")]
+    pub placement: Option<Placement>,
+}
+
+/// The arrangement of the peer's screens next to the sender's, in the
+/// sender's logical units.
+#[derive(Clone, Copy, PartialEq, Message)]
+pub struct Placement {
+    /// The sender's screen the peer is attached to; 0 picks the outermost
+    /// screen towards `edge`.
+    #[prost(uint32, tag = "1")]
+    pub display: u32,
+    /// The side of that screen the peer is on.
+    #[prost(enumeration = "Edge", tag = "2")]
+    pub edge: i32,
+    /// Offset along the edge from the screen's top (left/right) or left
+    /// (top/bottom) to the peer's; absent centres the peer.
+    #[prost(sint32, optional, tag = "3")]
+    pub offset: Option<i32>,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -424,6 +445,16 @@ pub enum Side {
     Unspecified = 0,
     Left = 1,
     Right = 2,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Enumeration)]
+#[repr(i32)]
+pub enum Edge {
+    Unspecified = 0,
+    Left = 1,
+    Right = 2,
+    Top = 3,
+    Bottom = 4,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Enumeration)]
