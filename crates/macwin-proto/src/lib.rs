@@ -20,8 +20,9 @@ pub use convert::check_relative_path;
 /// `major << 16 | minor`. Peers with a different major refuse each other.
 /// Minor 1 added clipboard streams (capability `clipboard.text`) and
 /// pairing; minor 2 clipboard images and files (`clipboard.image`,
-/// `clipboard.files`) and pixel wheel deltas (`input.wheel-pixel`).
-pub const PROTOCOL_VERSION: u32 = 0x0001_0002;
+/// `clipboard.files`) and pixel wheel deltas (`input.wheel-pixel`); minor 3
+/// the screen arrangement (`Hello.placement`, sent by the primary computer).
+pub const PROTOCOL_VERSION: u32 = 0x0001_0003;
 /// Largest frame body on the control and input streams, the pairing stream
 /// and in datagrams.
 pub const MAX_FRAME_LEN: usize = 64 * 1024;
