@@ -9,8 +9,8 @@
 //! ```
 //!
 //! Entering the code `000-000` fails, any other code pairs. With
-//! `--start-hidden` the window opens after three seconds, as if the tray icon
-//! had been clicked.
+//! `--start-hidden` the window opens after three seconds and again every six
+//! seconds, as if the tray icon had been clicked; closing the window hides it.
 
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -356,8 +356,11 @@ fn main() -> ExitCode {
             if start_hidden {
                 thread::spawn(move || {
                     thread::sleep(Duration::from_secs(3));
-                    eprintln!("tray: show the window");
-                    control.show();
+                    loop {
+                        eprintln!("tray: show the window");
+                        control.show();
+                        thread::sleep(Duration::from_secs(6));
+                    }
                 });
             }
         })),
