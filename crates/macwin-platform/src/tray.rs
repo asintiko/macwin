@@ -105,6 +105,12 @@ pub trait TrayApp: Send + Sync {
     fn view(&self) -> TrayView;
     fn clicked(&self, id: u32);
     fn entered(&self, id: u32, text: String);
+    /// Shows the app's window, when it has one: the icon was clicked
+    /// (Windows) or another launch asked for it. False when there is no
+    /// window, so the OS layer falls back to the menu.
+    fn open(&self) -> bool {
+        false
+    }
     /// True once the app has shut down; the UI loop then ends.
     fn finished(&self) -> bool;
 }

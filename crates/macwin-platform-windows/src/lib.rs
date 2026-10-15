@@ -24,5 +24,6 @@ pub use capture::WinCapture;
 pub use clipboard::WinClipboard;
 pub use dpapi::DpapiStore;
 pub use dpi::init_dpi_awareness;
+pub use tray::signal_running_instance;
 pub use inject::WinInjector;
 pub use screens::WinScreens;
