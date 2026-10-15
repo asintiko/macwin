@@ -10,6 +10,7 @@ use macwin_agent::driver::{
     Backends, ClipboardSettings, Connected, SessionConfig, SessionEnd, SessionHandle, kvm_hello,
     spawn_session,
 };
+use macwin_core::arrange::{Edge, Placement};
 use macwin_core::engine::{Timings, TransportRole};
 use macwin_core::msg::{ButtonMsg, Enter, InputMsg, KeyMsg};
 use macwin_core::types::{
@@ -38,12 +39,14 @@ fn screens(w: i32, h: i32) -> Vec<ScreenInfo> {
     }]
 }
 
-fn cfg(os: Os, name: &str, side: Side) -> SessionConfig {
+/// `placement` is where this machine put the other one; `None` makes it a
+/// secondary that follows the other's.
+fn cfg(os: Os, name: &str, placement: Option<Placement>) -> SessionConfig {
     SessionConfig {
         local_os: os,
         os_version: "test".into(),
         device_name: name.into(),
-        peer_side: side,
+        placement,
         remap: true,
         timings: Timings::default(),
         clipboard: None,
@@ -66,11 +69,11 @@ fn sharing(max: usize) -> Option<ClipboardSettings> {
 }
 
 fn mac_cfg() -> SessionConfig {
-    cfg(Os::MacOs, "mac", Side::Right)
+    cfg(Os::MacOs, "mac", Some(Placement::side(Side::Right)))
 }
 
 fn win_cfg() -> SessionConfig {
-    cfg(Os::Windows, "pc", Side::Left)
+    cfg(Os::Windows, "pc", Some(Placement::side(Side::Left)))
 }
 
 struct Peer {
