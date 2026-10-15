@@ -374,6 +374,29 @@ pub fn toggle_row(
     changed
 }
 
+/// A round "×" button; `hint` is its tooltip.
+pub fn close_button(ui: &mut Ui, pal: &Palette, hint: &str) -> Response {
+    let (rect, resp) = ui.allocate_exact_size(vec2(28.0, 28.0), Sense::click());
+    if ui.is_rect_visible(rect) {
+        let hover = ui
+            .ctx()
+            .animate_bool_with_time(resp.id, resp.hovered(), 0.12);
+        let painter = ui.painter();
+        painter.circle_filled(rect.center(), 14.0, tint(pal.muted, (hover * 50.0) as u8));
+        let color = pal.muted.lerp_to_gamma(pal.text, hover);
+        let d = 4.5;
+        let c = rect.center();
+        for (a, b) in [(vec2(-d, -d), vec2(d, d)), (vec2(-d, d), vec2(d, -d))] {
+            painter.line_segment([c + a, c + b], Stroke::new(1.8, color));
+        }
+        if resp.has_focus() {
+            focus_ring(ui, pal, rect, 14);
+        }
+    }
+    resp.on_hover_text(hint)
+        .on_hover_cursor(CursorIcon::PointingHand)
+}
+
 /// A dismissible banner; returns true when its close button was clicked.
 pub fn banner(
     ui: &mut Ui,
@@ -394,7 +417,7 @@ pub fn banner(
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
-                let text_w = (ui.available_width() - 110.0).max(100.0);
+                let text_w = (ui.available_width() - 44.0).max(100.0);
                 ui.allocate_ui_with_layout(vec2(text_w, 0.0), Layout::top_down(Align::Min), |ui| {
                     ui.set_width(text_w);
                     ui.spacing_mut().item_spacing.y = 2.0;
@@ -405,8 +428,8 @@ pub fn banner(
                         ui.label(RichText::new(message).size(14.0).color(pal.text));
                     }
                 });
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if button(ui, pal, close, Btn::Ghost).clicked() {
+                ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
+                    if close_button(ui, pal, close).clicked() {
                         dismissed = true;
                     }
                 });
