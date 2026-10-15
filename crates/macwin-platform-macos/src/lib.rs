@@ -9,6 +9,7 @@
 //! is signed with a stable identity.
 #![cfg(target_os = "macos")]
 
+pub mod app;
 mod capture;
 mod clipboard;
 mod convert;
