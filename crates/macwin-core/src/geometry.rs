@@ -1,6 +1,6 @@
-//! Validated screen sets and the primitive geometry used for edge mapping.
+//! Validated screen sets and the primitive geometry used for edge crossing.
 
-use crate::types::{GeometryError, Point, PointF, ScreenInfo, Side};
+use crate::types::{GeometryError, Point, PointF, ScreenInfo};
 
 /// Most screens accepted per machine.
 pub const MAX_SCREENS: usize = 16;
@@ -112,96 +112,6 @@ impl ScreenSet {
         let i = self.index_at(c).unwrap_or(0);
         &self.screens[i]
     }
-
-    /// Proportional position of `y` along the bounding box height, in
-    /// `[0, 1 - 1e-9]`.
-    pub fn t(&self, y: f64) -> f64 {
-        let b = self.bounds;
-        let span = f64::from(b.bottom) - f64::from(b.top);
-        let t = (sanitize_coord(y) - f64::from(b.top)) / span;
-        t.clamp(0.0, 1.0 - 1e-9)
-    }
-
-    /// The y coordinate at proportional position `t` of the bounding box.
-    pub fn y_at(&self, t: f64) -> f64 {
-        let b = self.bounds;
-        f64::from(b.top) + t * (f64::from(b.bottom) - f64::from(b.top))
-    }
-
-    /// True when the clamped point `p` sits on a free edge on `side`: the
-    /// last pixel column of its screen towards `side` with no screen beyond
-    /// it at that height.
-    pub fn at_free_edge(&self, p: PointF, side: Side) -> bool {
-        let px = p.floor();
-        let Some(i) = self.index_at(px) else {
-            return false;
-        };
-        let r = self.screens[i].rect;
-        match side {
-            Side::Right => px.x >= r.right() - 1 && !self.contains(Point::new(r.right(), px.y)),
-            Side::Left => px.x <= r.left() && !self.contains(Point::new(r.left() - 1, px.y)),
-        }
-    }
-
-    /// The screen whose `side` edge faces outward at height `y`: among the
-    /// screens spanning `floor(y)`, the minimal left (Left) or maximal right
-    /// (Right), ties to the lowest index. If none spans `y`, `y` is first
-    /// clamped into the vertically nearest screen. Returns the screen index
-    /// and `y` clamped into it.
-    pub fn face(&self, y: f64, side: Side) -> (usize, f64) {
-        let y = sanitize_coord(y);
-        if let Some(found) = self.face_spanning(y, side) {
-            return found;
-        }
-        let py = y.floor() as i64;
-        let mut best = 0;
-        let mut best_d = i64::MAX;
-        for (i, s) in self.screens.iter().enumerate() {
-            let (top, bottom) = (i64::from(s.rect.top()), i64::from(s.rect.bottom()));
-            let d = if py < top {
-                top - py
-            } else {
-                py - (bottom - 1)
-            };
-            if d < best_d {
-                best = i;
-                best_d = d;
-            }
-        }
-        let r = self.screens[best].rect;
-        let yc = y.clamp(f64::from(r.top()), f64::from(r.bottom() - 1));
-        // Re-select among the screens spanning the clamped height so the
-        // chosen edge is free at that height.
-        self.face_spanning(yc, side).unwrap_or((best, yc))
-    }
-
-    fn face_spanning(&self, y: f64, side: Side) -> Option<(usize, f64)> {
-        let py = y.floor() as i64;
-        let mut best: Option<usize> = None;
-        for (i, s) in self.screens.iter().enumerate() {
-            let r = s.rect;
-            if py < i64::from(r.top()) || py >= i64::from(r.bottom()) {
-                continue;
-            }
-            let better = match best {
-                None => true,
-                Some(b) => {
-                    let br = self.screens[b].rect;
-                    match side {
-                        Side::Left => r.left() < br.left(),
-                        Side::Right => r.right() > br.right(),
-                    }
-                }
-            };
-            if better {
-                best = Some(i);
-            }
-        }
-        best.map(|i| {
-            let r = self.screens[i].rect;
-            (i, y.clamp(f64::from(r.top()), f64::from(r.bottom() - 1)))
-        })
-    }
 }
 
 fn dist2(a: PointF, b: PointF) -> f64 {
@@ -266,7 +176,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn bounds_and_t() {
+    fn bounds_of_a_set() {
         let s = ScreenSet::new(vec![
             screen(1, 0, 0, 1440, 900, 1.0),
             screen(2, 1440, -100, 1920, 1080, 1.0),
@@ -281,11 +191,6 @@ pub(crate) mod tests {
                 bottom: 980
             }
         );
-        assert_eq!(s.t(-100.0), 0.0);
-        assert!((s.t(440.0) - 0.5).abs() < 1e-12);
-        assert!(s.t(5000.0) < 1.0);
-        assert_eq!(s.t(-5000.0), 0.0);
-        assert!((s.y_at(0.5) - 440.0).abs() < 1e-9);
     }
 
     #[test]
@@ -316,42 +221,5 @@ pub(crate) mod tests {
         assert_eq!(tie.clamp_f(PointF::new(14.5, 5.0)), PointF::new(9.0, 5.0));
         // Non-finite input still lands on screen.
         assert!(s.contains_f(s.clamp_f(PointF::new(f64::NAN, f64::INFINITY))));
-    }
-
-    #[test]
-    fn free_edges() {
-        // Laptop (0..1440) with an external monitor to its right, offset down.
-        let s = ScreenSet::new(vec![
-            screen(1, 0, 0, 1440, 900, 1.0),
-            screen(2, 1440, 300, 1920, 1080, 1.0),
-        ])
-        .unwrap();
-        // Right edge of the laptop is free above the external monitor only.
-        assert!(s.at_free_edge(PointF::new(1439.5, 100.0), Side::Right));
-        assert!(!s.at_free_edge(PointF::new(1439.5, 500.0), Side::Right));
-        assert!(s.at_free_edge(PointF::new(3359.0, 500.0), Side::Right));
-        assert!(!s.at_free_edge(PointF::new(3358.0, 500.0), Side::Right));
-        assert!(s.at_free_edge(PointF::new(0.0, 10.0), Side::Left));
-        assert!(s.at_free_edge(PointF::new(0.9, 10.0), Side::Left));
-        assert!(!s.at_free_edge(PointF::new(1.0, 10.0), Side::Left));
-        assert!(s.at_free_edge(PointF::new(1440.0, 1000.0), Side::Left));
-        assert!(!s.at_free_edge(PointF::new(1440.0, 500.0), Side::Left));
-    }
-
-    #[test]
-    fn face_selection() {
-        let s = ScreenSet::new(vec![
-            screen(1, 0, 0, 1440, 900, 1.0),
-            screen(2, 1440, 300, 1920, 1080, 1.0),
-        ])
-        .unwrap();
-        assert_eq!(s.face(100.0, Side::Right), (0, 100.0));
-        assert_eq!(s.face(500.0, Side::Right), (1, 500.0));
-        assert_eq!(s.face(500.0, Side::Left), (0, 500.0));
-        assert_eq!(s.face(1200.0, Side::Left), (1, 1200.0));
-        // Below everything: nearest screen is 2 (bottom 1380), y clamped to 1379.
-        assert_eq!(s.face(5000.0, Side::Left), (1, 1379.0));
-        // Above everything: screen 1, y clamped to 0.
-        assert_eq!(s.face(-50.0, Side::Right), (0, 0.0));
     }
 }
