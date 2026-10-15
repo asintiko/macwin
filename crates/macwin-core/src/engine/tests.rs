@@ -6,9 +6,10 @@ use std::time::{Duration, Instant};
 use proptest::prelude::*;
 
 use super::*;
+use crate::arrange::{Edge, Placement};
 use crate::geometry::tests::screen;
 use crate::msg::{CAP_INPUT_CAPTURE, Hello, Ping};
-use crate::types::{MouseButton, Point};
+use crate::types::{MouseButton, Point, Side};
 
 const MS: Duration = Duration::from_millis(1);
 const KEY_A: Hid = Hid(0x07_0004);
@@ -22,11 +23,21 @@ fn win_screens(npl: f64) -> Vec<ScreenInfo> {
     vec![screen(7, 0, 0, 1920, 1080, npl)]
 }
 
+/// An engine whose placement of the peer is the legacy left/right `side`.
 fn engine_with(os: Os, screens: Vec<ScreenInfo>, side: Side, remap: bool) -> Engine {
+    engine_placing(os, screens, Some(Placement::side(side)), remap)
+}
+
+fn engine_placing(
+    os: Os,
+    screens: Vec<ScreenInfo>,
+    placement: Option<Placement>,
+    remap: bool,
+) -> Engine {
     Engine::new(EngineConfig {
         local_os: os,
         local_screens: screens,
-        peer_side: side,
+        placement,
         remap,
         timings: Timings::default(),
     })
@@ -39,6 +50,7 @@ fn peer_with(os: Os, screens: Vec<ScreenInfo>, caps: &[&str]) -> PeerInfo {
         screens,
         capabilities: caps.iter().map(|c| c.to_string()).collect(),
         device_name: "peer".into(),
+        placement: None,
     }
 }
 
@@ -1070,6 +1082,7 @@ fn ping_is_answered_on_its_channel_and_late_hello_is_a_violation() {
         device_name: String::new(),
         screens: win_screens(1.0),
         peer_side: None,
+        placement: None,
         agent_version: String::new(),
     };
     assert_eq!(
@@ -1103,6 +1116,195 @@ fn reconnect_replaces_the_session_and_releases_first() {
             epoch: 1,
             at: Point::new(0, 540)
         }))
+    );
+}
+
+// 20
+#[test]
+fn a_secondary_follows_the_placement_in_the_peers_hello() {
+    let t0 = Instant::now();
+    // The Mac placed the PC to its right; the PC has no placement of its own.
+    let mut w = engine_placing(Os::Windows, win_screens(1.0), None, true);
+    let mut mac = peer_with(Os::MacOs, mac_screens(), &full_caps());
+    mac.placement = Some(Placement::side(Side::Right));
+    assert_eq!(w.on_connected(t0, mac, TransportRole::Listener), vec![]);
+    // The PC's left edge touches the Mac's right edge, its right edge nothing.
+    assert_eq!(w.on_local_event(t0, mv(1919.0, 540.0)), delivered());
+    assert_eq!(
+        w.on_local_event(t0, mv(0.0, 540.0)),
+        swallowed(enter_actions(
+            t0,
+            2,
+            Point::new(1439, 450),
+            ModifierMask::EMPTY,
+            Point::new(0, 540)
+        ))
+    );
+    // Back over the Mac's right edge: the PC's cursor returns inside its left.
+    assert_eq!(
+        w.on_local_event(t0, delta(5.0, 0.0)),
+        swallowed(vec![
+            Action::SendInput(InputMsg::Leave(Leave { epoch: 2 })),
+            Action::Capture(GrabCommand::Release {
+                warp_to: Point::new(2, 540)
+            }),
+        ])
+    );
+}
+
+// 21
+#[test]
+fn the_arranged_desk_crosses_from_either_side() {
+    let t0 = Instant::now();
+    let desk = vec![
+        screen(1, 0, 0, 1512, 982, 1.0),
+        screen(2, -524, -1440, 2560, 1440, 1.0),
+        screen(3, 2036, -1440, 1920, 1080, 1.0),
+    ];
+    let laptop = vec![screen(1, 0, 0, 2304, 1296, 1.5)];
+    let placement = Placement {
+        display: Some(1),
+        edge: Edge::Left,
+        offset: Some(0),
+    };
+    let mut mac = engine_placing(Os::MacOs, desk.clone(), Some(placement), true);
+    assert_eq!(
+        mac.on_connected(
+            t0,
+            peer_with(Os::Windows, laptop.clone(), &full_caps()),
+            TransportRole::Dialer
+        ),
+        vec![]
+    );
+    let mut pc = engine_placing(Os::Windows, laptop, None, true);
+    let mut hello = peer_with(Os::MacOs, desk, &full_caps());
+    hello.placement = Some(placement);
+    assert_eq!(pc.on_connected(t0, hello, TransportRole::Listener), vec![]);
+
+    // Where the screens do not touch the cursor stays home.
+    assert_eq!(mac.on_local_event(t0, mv(0.0, 950.0)), delivered());
+    assert_eq!(mac.on_local_event(t0, mv(-524.0, -700.0)), delivered());
+    assert_eq!(pc.on_local_event(t0, mv(1000.0, 1295.0)), delivered());
+    // The MacBook's left edge leads to the laptop's right edge ...
+    assert_eq!(
+        mac.on_local_event(t0, mv(0.0, 500.0)),
+        swallowed(enter_actions(
+            t0,
+            1,
+            Point::new(2303, 750),
+            ModifierMask::EMPTY,
+            Point::new(0, 500)
+        ))
+    );
+    // ... a grab that ends any other way parks the cursor inside that edge.
+    assert_eq!(
+        mac.on_disconnected(t0),
+        vec![Action::Capture(GrabCommand::Release {
+            warp_to: Point::new(2, 500)
+        })]
+    );
+    // The laptop's right edge leads to the MacBook's left edge.
+    assert_eq!(
+        pc.on_local_event(t0, mv(2303.0, 750.0)),
+        swallowed(enter_actions(
+            t0,
+            2,
+            Point::new(0, 500),
+            ModifierMask::EMPTY,
+            Point::new(2303, 750)
+        ))
+    );
+    assert_eq!(
+        pc.on_disconnected(t0),
+        vec![Action::Capture(GrabCommand::Release {
+            warp_to: Point::new(2301, 750)
+        })]
+    );
+}
+
+// 22
+#[test]
+fn a_grab_ends_inside_the_edge_it_left_by() {
+    let t0 = Instant::now();
+    let above = Placement {
+        display: None,
+        edge: Edge::Top,
+        offset: None,
+    };
+    let mut e = engine_placing(Os::MacOs, mac_screens(), Some(above), true);
+    let connect = |e: &mut Engine| {
+        let peer = peer_with(Os::Windows, win_screens(1.0), &full_caps());
+        e.on_connected(t0, peer, TransportRole::Dialer)
+    };
+    connect(&mut e);
+    let up = CapturedEvent::MouseMove {
+        pos: PointF::new(500.0, 0.0),
+        delta: PointF::new(0.0, -5.0),
+    };
+    // The 1920 pixel wide PC is centred above the 1440 wide Mac.
+    assert_eq!(
+        e.on_local_event(t0, up),
+        swallowed(enter_actions(
+            t0,
+            1,
+            Point::new(740, 1079),
+            ModifierMask::EMPTY,
+            Point::new(500, 0)
+        ))
+    );
+    // A grab that ends without crossing back parks the cursor just inside
+    // the Mac's top edge ...
+    assert_eq!(
+        e.on_disconnected(t0),
+        vec![Action::Capture(GrabCommand::Release {
+            warp_to: Point::new(500, 2)
+        })]
+    );
+    // ... and so does crossing back over the PC's bottom edge.
+    connect(&mut e);
+    assert!(!e.on_local_event(t0, up).deliver);
+    assert_eq!(
+        e.on_local_event(t0, delta(0.0, 5.0)),
+        swallowed(vec![
+            Action::SendInput(InputMsg::Leave(Leave { epoch: 1 })),
+            Action::Capture(GrabCommand::Release {
+                warp_to: Point::new(500, 2)
+            }),
+        ])
+    );
+}
+
+// 23
+#[test]
+fn my_own_placement_wins_and_without_any_the_peer_stays_out_of_reach() {
+    let t0 = Instant::now();
+    // Both place the other to the right: this Mac keeps its own placement.
+    let mut mac = engine_with(Os::MacOs, mac_screens(), Side::Right, true);
+    let mut peer = peer_with(Os::Windows, win_screens(1.0), &full_caps());
+    peer.placement = Some(Placement::side(Side::Right));
+    mac.on_connected(t0, peer, TransportRole::Dialer);
+    assert_eq!(mac.on_local_event(t0, mv(0.0, 450.0)), delivered());
+    assert!(!mac.on_local_event(t0, mv(1439.5, 450.0)).deliver);
+
+    // Neither side placed anything.
+    let mut lost = engine_placing(Os::MacOs, mac_screens(), None, true);
+    lost.on_connected(
+        t0,
+        peer_with(Os::Windows, win_screens(1.0), &full_caps()),
+        TransportRole::Dialer,
+    );
+    assert_eq!(lost.on_local_event(t0, mv(1439.5, 450.0)), delivered());
+    assert_eq!(lost.on_local_event(t0, mv(0.0, 450.0)), delivered());
+    // It still takes the peer's input.
+    assert_eq!(
+        lost.on_input(
+            t0,
+            InputMsg::Enter(Enter {
+                epoch: 2,
+                at: Point::new(9999, 450)
+            })
+        ),
+        vec![Action::Inject(InjectCommand::MoveTo(Point::new(1439, 450)))]
     );
 }
 
