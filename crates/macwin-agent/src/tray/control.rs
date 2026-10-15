@@ -25,14 +25,14 @@ use super::{
 };
 use crate::autostart::{Autostart, AutostartState};
 use crate::commands::{save_found_address, session_config};
-use crate::config::{Config, side_name};
+use crate::config::{Config, normalize_address, side_name};
 use crate::driver::Backends;
 use crate::lan::reachable_ip;
 use crate::pairing::{
     agree_side, find_waiting, pairing_responder, store_pairing, wait_for_pairing,
 };
 use crate::runner::{
-    self, Mode, RunDiscovery, RunEvent, RunExit, RunOptions, bind_for, retry_in_use,
+    self, Mode, RunDiscovery, RunEvent, RunExit, RunOptions, bind_for, resolve, retry_in_use,
 };
 
 /// Builds the backends of one connection attempt; the flag says whether the
@@ -76,6 +76,7 @@ enum Internal {
         code: PairingCode,
         /// `HOST:PORT` of this machine, for typing on the other one.
         address: String,
+        replacement: bool,
     },
     PairDone {
         tag: u64,
@@ -145,7 +146,7 @@ async fn wait_here(
     config: &Config,
     id: &Identity,
     info: &PairInfo,
-    mut show: impl FnMut(&PairingCode, String),
+    mut show: impl FnMut(&PairingCode, String, bool),
 ) -> anyhow::Result<PairedPeer> {
     let listener = retry_in_use(|| pair_listen(config.listen, id))
         .await
@@ -162,7 +163,10 @@ async fn wait_here(
             None
         }
     };
-    let result = wait_for_pairing(&listener, info, |code, _| show(code, address.clone())).await;
+    let result = wait_for_pairing(&listener, info, |code, previous| {
+        show(code, address.clone(), previous.is_some())
+    })
+    .await;
     drop(responder);
     listener.shutdown().await;
     result
@@ -182,6 +186,33 @@ async fn pair_with_waiting(
         .await
         .with_context(|| format!("pairing with \"{}\" failed", found.device_name))?;
     Ok((peer, Some(found.addr.to_string())))
+}
+
+fn parse_pair_entry(input: &str) -> anyhow::Result<(Option<String>, PairingCode)> {
+    let input = input.trim();
+    if let Ok(code) = PairingCode::parse(input) {
+        return Ok((None, code));
+    }
+    let (address, code) = input
+        .split_once(char::is_whitespace)
+        .context("enter a pairing code or HOST[:PORT] followed by a code")?;
+    Ok((
+        Some(normalize_address(address)?),
+        PairingCode::parse(code.trim())?,
+    ))
+}
+
+async fn pair_at_address(
+    address: &str,
+    id: &Identity,
+    info: &PairInfo,
+    code: &PairingCode,
+) -> anyhow::Result<(PairedPeer, Option<String>)> {
+    let remote = resolve(address).await?;
+    let peer = pair_connect(bind_for(remote), remote, id, code, info)
+        .await
+        .with_context(|| format!("pairing with {address} failed"))?;
+    Ok((peer, Some(address.to_owned())))
 }
 
 impl Controller {
@@ -460,9 +491,14 @@ impl Controller {
         let tx = self.tx.clone();
         let task = tokio::spawn(async move {
             let codes = tx.clone();
-            let show = move |code: &PairingCode, address: String| {
+            let show = move |code: &PairingCode, address: String, replacement| {
                 let code = code.clone();
-                let _ = codes.send(Internal::PairCode { tag, code, address });
+                let _ = codes.send(Internal::PairCode {
+                    tag,
+                    code,
+                    address,
+                    replacement,
+                });
             };
             let result = wait_here(&config, &id, &info, show)
                 .await
@@ -475,13 +511,19 @@ impl Controller {
         self.set_phase(Phase::PairingWait { code: None });
     }
 
-    /// Finds the computer that shows `text` as its code and pairs with it.
+    /// Pairs by code, optionally at the address entered before it.
     async fn pair_with_code(&mut self, text: String) {
-        let Ok(code) = PairingCode::parse(&text) else {
-            return self.notify(
-                "Invalid pairing code",
-                "Enter the 6 digits shown on the other computer, for example 123-456.",
-            );
+        let (address, code) = match parse_pair_entry(&text) {
+            Ok(parsed) => parsed,
+            Err(e) => {
+                return self.notify(
+                    "Invalid pairing input",
+                    format!(
+                        "Enter a 6-digit code, or HOST[:PORT] followed by the code shown in the \
+                         pairing notice. {e:#}"
+                    ),
+                );
+            }
         };
         self.cancel_pairing();
         self.stop_sharing().await;
@@ -493,11 +535,17 @@ impl Controller {
         let info = self.pair_info();
         let id = self.env.identity.clone();
         let tx = self.tx.clone();
-        let targets = (self.env.discovery_targets)(config.discovery_port);
+        let targets = if address.is_none() {
+            (self.env.discovery_targets)(config.discovery_port)
+        } else {
+            Vec::new()
+        };
         let task = tokio::spawn(async move {
-            let result = pair_with_waiting(&config, &id, &info, &code, &targets)
-                .await
-                .map_err(|e| format!("{e:#}"));
+            let result = match address {
+                Some(address) => pair_at_address(&address, &id, &info, &code).await,
+                None => pair_with_waiting(&config, &id, &info, &code, &targets).await,
+            }
+            .map_err(|e| format!("{e:#}"));
             let _ = tx.send(Internal::PairDone { tag, result });
         });
         self.pairing = Some(Pairing { tag, task });
@@ -526,15 +574,31 @@ impl Controller {
                     Err(e) => self.fail(e),
                 }
             }
-            Internal::PairCode { tag, code, address } if pairing == Some(tag) => {
+            Internal::PairCode {
+                tag,
+                code,
+                address,
+                replacement,
+            } if pairing == Some(tag) => {
                 let (shown, digits) = (code.to_string(), code.digits().to_string());
                 self.state.phase = Phase::PairingWait { code: Some(code) };
+                let title = if replacement {
+                    format!("New pairing code {shown}")
+                } else {
+                    format!("Pairing code {shown}")
+                };
+                let prefix = if replacement {
+                    "The previous code is no longer valid; use this replacement code.\n"
+                } else {
+                    ""
+                };
                 self.notify(
-                    format!("Pairing code {shown}"),
+                    title,
                     format!(
-                        "On the other computer, choose \"Enter pairing code…\" in the macwin \
-                         menu and type {digits}, or run:\n  macwin pair --code {digits}\nIf it \
-                         does not find this computer:\n  macwin pair {address} --code {digits}\n\
+                        "{prefix}On the other computer, choose Enter pairing code… in the macwin \
+                         menu and type {digits}, or run:\n  macwin pair --code {digits}\n\
+                         If LAN discovery fails, enter {address} {digits} in that menu or run:\n  \
+                         macwin pair {address} --code {digits}\n\
                          The code works once, for 10 minutes."
                     ),
                 );
@@ -596,5 +660,35 @@ impl Controller {
             Err(e) => self.notify("Pairing failed", e),
         }
         self.start_sharing();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_pair_entry;
+
+    #[test]
+    fn pairing_entry_preserves_supported_code_formats() {
+        for input in ["123456", "123-456", " 123 456 "] {
+            let (address, code) = parse_pair_entry(input).unwrap();
+            assert_eq!(address, None);
+            assert_eq!(code.digits(), "123456");
+        }
+    }
+
+    #[test]
+    fn pairing_entry_accepts_an_address_and_code() {
+        for input in ["127.0.0.1:47800 123-456", "127.0.0.1 123 456"] {
+            let (address, code) = parse_pair_entry(input).unwrap();
+            assert_eq!(address.as_deref(), Some("127.0.0.1:47800"));
+            assert_eq!(code.digits(), "123456");
+        }
+    }
+
+    #[test]
+    fn pairing_entry_rejects_missing_or_extra_fields() {
+        for input in ["", "123", "127.0.0.1", "127.0.0.1 123456 extra"] {
+            assert!(parse_pair_entry(input).is_err(), "{input:?}");
+        }
     }
 }

@@ -128,7 +128,7 @@ pub fn status_line(s: &TrayState) -> String {
         Phase::EmergencyPaused => "Paused by the emergency chord".into(),
         Phase::PairingWait { code: Some(code) } => format!("Pairing code: {code}"),
         Phase::PairingWait { code: None } => "Getting ready to pair…".into(),
-        Phase::PairingDial => "Looking for the other computer…".into(),
+        Phase::PairingDial => "Pairing with the other computer…".into(),
         Phase::Failed(_) => "Sharing stopped by an error".into(),
         Phase::Quitting => "Quitting…".into(),
     }
@@ -220,10 +220,8 @@ pub fn render(s: &TrayState) -> TrayView {
             MenuItem::new(ID_PAIR_CODE, "Enter pairing code…")
                 .enabled(!quitting)
                 .input(TextRequest {
-                    title: "Enter pairing code".into(),
-                    message: "Type the code the other computer shows after \"Pair with another \
-                              computer…\" (or `macwin pair`)."
-                        .into(),
+                    title: "Enter pairing code or address".into(),
+                    message: "Type the code shown by the other computer. If LAN discovery fails, enter HOST:PORT and the code from its notice, for example 192.168.1.20:47800 123-456.".into(),
                     confirm: "Pair".into(),
                 }),
         ));

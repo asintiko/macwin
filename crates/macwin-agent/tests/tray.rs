@@ -12,7 +12,7 @@ use macwin_agent::driver::{Backends, SessionConfig};
 use macwin_agent::runner::{Mode, RunEvent, RunExit, RunOptions, run};
 use macwin_agent::tray::{
     self, ID_AUTOSTART, ID_CLIPBOARD, ID_PAIR_CANCEL, ID_PAIR_CODE, ID_PAIR_WAIT, ID_PAUSE,
-    ID_QUIT, ID_SIDE_RIGHT, Phase, TrayEnv, TrayShared, TrayState,
+    ID_QUIT, ID_SIDE_LEFT, ID_SIDE_RIGHT, Phase, TrayEnv, TrayShared, TrayState,
 };
 use macwin_core::engine::Timings;
 use macwin_core::types::{CaptureFault, Os, Rect, ScreenInfo, Side};
@@ -70,6 +70,10 @@ struct Tray {
 /// A tray on a Mac whose config listens on loopback and whose discovery
 /// queries go to `targets`; the clipboard is off (fake backends have none).
 fn start_tray(targets: Vec<SocketAddr>) -> Tray {
+    start_tray_as(Os::MacOs, "mac", targets)
+}
+
+fn start_tray_as(os: Os, device_name: &str, targets: Vec<SocketAddr>) -> Tray {
     let dir = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
     let listen = local(free_port());
@@ -86,8 +90,8 @@ fn start_tray(targets: Vec<SocketAddr>) -> Tray {
     let env = TrayEnv {
         config_dir: dir.path().to_path_buf(),
         identity: id.clone(),
-        os: Os::MacOs,
-        device_name: "mac".into(),
+        os,
+        device_name: device_name.into(),
         staging: dir.path().join("incoming"),
         make_backends: Arc::new(move |_clipboard| backends(&made)),
         autostart: Some(Autostart::new(
@@ -350,8 +354,10 @@ async fn entering_a_code_finds_the_waiting_computer() {
 
     // Waiting can be cancelled.
     tray.shared.clicked(ID_PAIR_WAIT);
-    tray.wait("waiting", |s| matches!(s.phase, Phase::PairingWait { .. }))
-        .await;
+    tray.wait("waiting with a code", |s| {
+        matches!(s.phase, Phase::PairingWait { code: Some(_) })
+    })
+    .await;
     tray.shared.clicked(ID_PAIR_CANCEL);
     let s = tray
         .wait("cancelled", |s| s.phase == Phase::NotPaired)
@@ -361,7 +367,7 @@ async fn entering_a_code_finds_the_waiting_computer() {
     // A malformed code is refused before anything happens.
     tray.shared.entered(ID_PAIR_CODE, "12x".into());
     let s = tray
-        .wait("refused", |s| notice_title(s) == "Invalid pairing code")
+        .wait("refused", |s| notice_title(s) == "Invalid pairing input")
         .await;
     assert_eq!(s.phase, Phase::NotPaired);
 
@@ -388,5 +394,150 @@ async fn entering_a_code_finds_the_waiting_computer() {
     .await;
     assert_eq!(tray.config().peer.unwrap().side, Some(Side::Right));
     drop(responder);
+    tray.quit().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn two_trays_pair_by_address_without_discovery_or_sides() {
+    let mac = start_tray(vec![]);
+    mac.wait("Mac not paired", |s| s.phase == Phase::NotPaired)
+        .await;
+    mac.shared.clicked(ID_PAIR_WAIT);
+    let waiting = mac
+        .wait("Mac pairing code", |s| {
+            matches!(s.phase, Phase::PairingWait { code: Some(_) })
+        })
+        .await;
+    let Phase::PairingWait { code: Some(code) } = waiting.phase else {
+        unreachable!()
+    };
+    let direct_entry = format!("{} {}", mac.listen, code.digits());
+    assert!(
+        waiting
+            .notice
+            .as_ref()
+            .unwrap()
+            .message
+            .contains(&direct_entry),
+        "the notice explains the tray's direct-address fallback"
+    );
+
+    let windows = start_tray_as(Os::Windows, "windows", vec![]);
+    windows
+        .wait("Windows not paired", |s| s.phase == Phase::NotPaired)
+        .await;
+    windows.shared.entered(ID_PAIR_CODE, direct_entry);
+
+    let mac_state = mac
+        .wait("Mac paired without a configured side", |s| {
+            s.phase == Phase::NeedsSide
+        })
+        .await;
+    let windows_state = windows
+        .wait("Windows paired without a configured side", |s| {
+            s.phase == Phase::NeedsSide
+        })
+        .await;
+    assert_eq!(
+        (
+            mac_state.peer.as_ref().unwrap().name.as_str(),
+            mac_state.peer.as_ref().unwrap().os,
+            mac_state.peer.as_ref().unwrap().side,
+        ),
+        ("windows", Os::Windows, None)
+    );
+    assert_eq!(
+        (
+            windows_state.peer.as_ref().unwrap().name.as_str(),
+            windows_state.peer.as_ref().unwrap().os,
+            windows_state.peer.as_ref().unwrap().side,
+        ),
+        ("mac", Os::MacOs, None)
+    );
+    assert_eq!(mac.config().peer.unwrap().address, None);
+    assert_eq!(
+        windows.config().peer.unwrap().address,
+        Some(mac.listen.to_string())
+    );
+
+    windows.shared.clicked(ID_SIDE_LEFT);
+    mac.shared.clicked(ID_SIDE_RIGHT);
+    mac.wait("Mac connected", connected).await;
+    windows.wait("Windows connected", connected).await;
+
+    windows.quit().await;
+    mac.quit().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_replacement_pairing_code_is_marked_and_cleared_on_cancel() {
+    let tray = start_tray(vec![]);
+    tray.wait("not paired", |s| s.phase == Phase::NotPaired)
+        .await;
+    tray.shared.clicked(ID_PAIR_WAIT);
+    let first = tray
+        .wait("initial pairing code", |s| {
+            matches!(s.phase, Phase::PairingWait { code: Some(_) })
+        })
+        .await;
+    let Phase::PairingWait {
+        code: Some(first_code),
+    } = first.phase
+    else {
+        unreachable!()
+    };
+
+    let wrong_code = loop {
+        let code = PairingCode::generate().unwrap();
+        if code != first_code {
+            break code;
+        }
+    };
+    let info = PairInfo {
+        os: Os::Windows,
+        device_name: "wrong-code-peer".into(),
+        peer_side: None,
+    };
+    let attempt = tokio::time::timeout(
+        T,
+        pair_connect(
+            local(0),
+            tray.listen,
+            &Identity::generate().unwrap(),
+            &wrong_code,
+            &info,
+        ),
+    )
+    .await
+    .expect("the wrong-code attempt should finish");
+    assert!(attempt.is_err());
+
+    let replacement = tray
+        .wait("replacement pairing code", |s| {
+            s.notice
+                .as_ref()
+                .is_some_and(|notice| notice.title.starts_with("New pairing code "))
+        })
+        .await;
+    let Phase::PairingWait {
+        code: Some(new_code),
+    } = &replacement.phase
+    else {
+        unreachable!()
+    };
+    assert_eq!(
+        notice_title(&replacement),
+        format!("New pairing code {new_code}")
+    );
+    let new_digits = new_code.digits().to_owned();
+    let notice = replacement.notice.unwrap();
+    assert!(notice.message.contains("previous code is no longer valid"));
+    assert!(notice.message.contains(&new_digits));
+
+    tray.shared.clicked(ID_PAIR_CANCEL);
+    let cancelled = tray
+        .wait("cancelled", |s| s.phase == Phase::NotPaired)
+        .await;
+    assert_eq!(cancelled.notice, None);
     tray.quit().await;
 }
