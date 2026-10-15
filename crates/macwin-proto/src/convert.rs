@@ -2,6 +2,7 @@
 //! every field ("parse, don't validate"), so the rest of macwin only ever
 //! sees well-formed domain values.
 
+use macwin_core::arrange::{Edge, Placement};
 use macwin_core::geometry::ScreenSet;
 use macwin_core::msg::{
     ButtonMsg, ClipboardImage, ClipboardMsg, ClipboardText, ControlMsg, DatagramMsg,
@@ -42,6 +43,23 @@ fn side_to_wire(side: Option<Side>) -> wire::Side {
         None => wire::Side::Unspecified,
         Some(Side::Left) => wire::Side::Left,
         Some(Side::Right) => wire::Side::Right,
+    }
+}
+
+fn edge_to_wire(edge: Edge) -> wire::Edge {
+    match edge {
+        Edge::Left => wire::Edge::Left,
+        Edge::Right => wire::Edge::Right,
+        Edge::Top => wire::Edge::Top,
+        Edge::Bottom => wire::Edge::Bottom,
+    }
+}
+
+fn placement_to_wire(p: Placement) -> wire::Placement {
+    wire::Placement {
+        display: p.display.unwrap_or(0),
+        edge: edge_to_wire(p.edge) as i32,
+        offset: p.offset,
     }
 }
 
@@ -106,6 +124,7 @@ fn hello_to_wire(h: &Hello) -> wire::Hello {
             .collect(),
         peer_side: side_to_wire(h.peer_side) as i32,
         agent_version: h.agent_version.clone(),
+        placement: h.placement.map(placement_to_wire),
     }
 }
 
@@ -228,6 +247,32 @@ fn side_from_wire(v: i32, field: &'static str) -> Result<Option<Side>, ProtoErro
     }
 }
 
+fn edge_from_wire(v: i32, field: &'static str) -> Result<Edge, ProtoError> {
+    match wire::Edge::try_from(v) {
+        Ok(wire::Edge::Left) => Ok(Edge::Left),
+        Ok(wire::Edge::Right) => Ok(Edge::Right),
+        Ok(wire::Edge::Top) => Ok(Edge::Top),
+        Ok(wire::Edge::Bottom) => Ok(Edge::Bottom),
+        _ => Err(ProtoError::InvalidEnum { field, value: v }),
+    }
+}
+
+/// An absent message is no placement; a present one needs a valid edge. Any
+/// display id and offset is accepted: placing clamps them to the screens.
+fn placement_from_wire(
+    p: Option<wire::Placement>,
+    field: &'static str,
+) -> Result<Option<Placement>, ProtoError> {
+    p.map(|p| {
+        Ok(Placement {
+            display: (p.display != 0).then_some(p.display),
+            edge: edge_from_wire(p.edge, field)?,
+            offset: p.offset,
+        })
+    })
+    .transpose()
+}
+
 fn role_from_wire(v: i32) -> Result<RoleKind, ProtoError> {
     match wire::Role::try_from(v) {
         Ok(wire::Role::Idle) => Ok(RoleKind::Idle),
@@ -347,6 +392,7 @@ fn hello_from_wire(h: wire::Hello) -> Result<Hello, ProtoError> {
         device_name: string_from_wire(h.device_name, "hello.device_name")?,
         screens: screens_from_wire(h.screens)?,
         peer_side: side_from_wire(h.peer_side, "hello.peer_side")?,
+        placement: placement_from_wire(h.placement, "hello.placement.edge")?,
         agent_version: string_from_wire(h.agent_version, "hello.agent_version")?,
     })
 }

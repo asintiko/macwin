@@ -1,5 +1,6 @@
 //! Codec unit tests: every validation rule, version checks and property tests.
 
+use macwin_core::arrange::{Edge, Placement};
 use macwin_core::msg::{
     ButtonMsg, ClipboardMsg, ClipboardText, ControlMsg, DatagramMsg, DiscoveryAnswer, DiscoveryMsg,
     DiscoveryOffer, DiscoveryQuery, DiscoverySeek, Enter, Heartbeat, Hello, InputMsg, KeyMsg,
@@ -36,6 +37,15 @@ fn valid_hello() -> wire::Hello {
         screens: vec![valid_screen()],
         peer_side: wire::Side::Right as i32,
         agent_version: "0.1.0".into(),
+        placement: None,
+    }
+}
+
+fn wire_placement(display: u32, edge: wire::Edge, offset: Option<i32>) -> wire::Placement {
+    wire::Placement {
+        display,
+        edge: edge as i32,
+        offset,
     }
 }
 
@@ -80,6 +90,53 @@ fn valid_hello_decodes() {
         panic!("not a hello")
     };
     assert_eq!(h.peer_side, None);
+    assert_eq!(h.placement, None, "an absent message is no placement");
+}
+
+#[test]
+fn hello_placement_decodes() {
+    let decode = |p: wire::Placement| {
+        let mut h = valid_hello();
+        h.placement = Some(p);
+        match decode_hello(h) {
+            Ok(ControlMsg::Hello(h)) => h.placement,
+            other => panic!("expected a hello, got {other:?}"),
+        }
+    };
+    assert_eq!(
+        decode(wire_placement(2, wire::Edge::Left, Some(-30))),
+        Some(Placement {
+            display: Some(2),
+            edge: Edge::Left,
+            offset: Some(-30)
+        })
+    );
+    // Display 0 is automatic, an absent offset centres.
+    assert_eq!(
+        decode(wire_placement(0, wire::Edge::Bottom, None)),
+        Some(Placement {
+            display: None,
+            edge: Edge::Bottom,
+            offset: None
+        })
+    );
+    // Any offset is carried; placing clamps it.
+    for offset in [i32::MIN, 0, i32::MAX] {
+        let p = decode(wire_placement(u32::MAX, wire::Edge::Top, Some(offset))).unwrap();
+        assert_eq!((p.display, p.offset), (Some(u32::MAX), Some(offset)));
+    }
+}
+
+#[test]
+fn placement_is_additive_for_older_peers() {
+    // Peers of protocol 1.2 skip the unknown tag 9, so everything they read
+    // is byte-identical with or without it.
+    let plain = valid_hello();
+    let mut placed = valid_hello();
+    placed.placement = Some(wire_placement(1, wire::Edge::Right, Some(5)));
+    let (plain, placed) = (plain.encode_to_vec(), placed.encode_to_vec());
+    assert!(placed.len() > plain.len() && placed.starts_with(&plain));
+    assert_eq!(placed[plain.len()], 0x4A, "field 9, length-delimited");
 }
 
 #[test]
@@ -169,6 +226,19 @@ fn unspecified_and_unknown_enums_are_rejected() {
     let mut h = valid_hello();
     h.peer_side = 7;
     assert_invalid_enum(decode_hello(h), "hello.peer_side");
+    for edge in [0, 5, -1, i32::MAX] {
+        let mut h = valid_hello();
+        h.placement = Some(wire::Placement {
+            display: 1,
+            edge,
+            offset: None,
+        });
+        assert_invalid_enum(decode_hello(h), "hello.placement.edge");
+    }
+    // A present but empty placement has no edge either.
+    let mut h = valid_hello();
+    h.placement = Some(wire::Placement::default());
+    assert_invalid_enum(decode_hello(h), "hello.placement.edge");
 }
 
 #[test]
@@ -632,6 +702,22 @@ fn arb_screens() -> impl Strategy<Value = Vec<ScreenInfo>> {
     })
 }
 
+/// Display 0 is "automatic" on the wire, so a real display id is never 0.
+fn arb_placement() -> impl Strategy<Value = Option<Placement>> {
+    prop::option::of(
+        (
+            prop::option::of(1u32..),
+            prop::sample::select(Edge::ALL.to_vec()),
+            prop::option::of(any::<i32>()),
+        )
+            .prop_map(|(display, edge, offset)| Placement {
+                display,
+                edge,
+                offset,
+            }),
+    )
+}
+
 fn arb_hello() -> impl Strategy<Value = Hello> {
     (
         any::<u32>(),
@@ -641,6 +727,7 @@ fn arb_hello() -> impl Strategy<Value = Hello> {
         arb_string(),
         arb_screens(),
         prop::option::of(prop::sample::select(vec![Side::Left, Side::Right])),
+        arb_placement(),
         arb_string(),
     )
         .prop_map(
@@ -652,6 +739,7 @@ fn arb_hello() -> impl Strategy<Value = Hello> {
                 device_name,
                 screens,
                 peer_side,
+                placement,
                 agent_version,
             )| {
                 Hello {
@@ -662,6 +750,7 @@ fn arb_hello() -> impl Strategy<Value = Hello> {
                     device_name,
                     screens,
                     peer_side,
+                    placement,
                     agent_version,
                 }
             },
