@@ -223,8 +223,23 @@ fn visuals(p: &Palette) -> Visuals {
     v
 }
 
-/// Installs the fonts sizes, spacing and colours for both themes.
+/// The bundled fonts, with Hack as a fallback for the glyphs Ubuntu lacks
+/// (arrows, for one).
+fn fonts() -> egui::FontDefinitions {
+    let mut fonts = egui::FontDefinitions::default();
+    if let Some(family) = fonts.families.get_mut(&FontFamily::Proportional) {
+        let at = family
+            .iter()
+            .position(|name| name == "Ubuntu-Light")
+            .map_or(0, |i| i + 1);
+        family.insert(at, "Hack".to_owned());
+    }
+    fonts
+}
+
+/// Installs the fonts, text sizes, spacing and colours for both themes.
 pub fn install(ctx: &egui::Context) {
+    ctx.set_fonts(fonts());
     ctx.set_visuals_of(Theme::Dark, visuals(&Palette::new(true)));
     ctx.set_visuals_of(Theme::Light, visuals(&Palette::new(false)));
     ctx.all_styles_mut(|style| {
@@ -271,6 +286,22 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn hack_backs_up_the_proportional_font() {
+        let f = fonts();
+        let family = &f.families[&FontFamily::Proportional];
+        let hack = family
+            .iter()
+            .position(|n| n == "Hack")
+            .expect("Hack is a fallback");
+        let ubuntu = family
+            .iter()
+            .position(|n| n == "Ubuntu-Light")
+            .expect("Ubuntu leads");
+        assert!(ubuntu < hack);
+        assert!(f.font_data.contains_key("Hack"));
     }
 
     #[test]
