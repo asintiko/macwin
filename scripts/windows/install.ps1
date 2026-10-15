@@ -36,10 +36,20 @@ function Send-SettingChange {
     [Environment]::SetEnvironmentVariable('MACWIN_SETTING_CHANGE', $null, 'User')
 }
 
+function Test-PathWithinFolder([string]$Path, [string]$Folder) {
+    # A separator boundary avoids matching siblings such as `macwin-old`.
+    $folderPath = [IO.Path]::GetFullPath($Folder)
+    $separator = [IO.Path]::DirectorySeparatorChar
+    if ($folderPath[$folderPath.Length - 1] -ne $separator) {
+        $folderPath += $separator
+    }
+    [IO.Path]::GetFullPath($Path).StartsWith($folderPath, [StringComparison]::OrdinalIgnoreCase)
+}
+
 function Stop-Macwin([string]$Folder) {
     # A running copy keeps its files locked; its peer just sees a disconnect.
     Get-Process -Name 'macwin', 'macwin-tray' -ErrorAction SilentlyContinue |
-        Where-Object { $_.Path -and $_.Path.StartsWith($Folder, [StringComparison]::OrdinalIgnoreCase) } |
+        Where-Object { $_.Path -and (Test-PathWithinFolder $_.Path $Folder) } |
         Stop-Process -Force -PassThru |
         Wait-Process -Timeout 10 -ErrorAction SilentlyContinue
 }

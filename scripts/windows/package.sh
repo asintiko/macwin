@@ -26,20 +26,22 @@ cargo build --release --locked -p macwin-agent --target "$TARGET"
 
 NAME="macwin-$VERSION-windows-x64"
 ZIP="$ROOT/target/$NAME.zip"
+TMP_ZIP="$ZIP.tmp.$$"
 STAGE="$(mktemp -d)"
-trap 'rm -rf "$STAGE"' EXIT
+rm -f "$TMP_ZIP"
+trap 'rm -rf "$STAGE"; rm -f "$TMP_ZIP"' EXIT
 mkdir "$STAGE/$NAME"
 cp "target/$TARGET/release/macwin.exe" "target/$TARGET/release/macwin-tray.exe" \
     scripts/windows/install.cmd scripts/windows/install.ps1 scripts/windows/uninstall.ps1 \
     scripts/windows/README.txt THIRD_PARTY_NOTICES "$STAGE/$NAME/"
-rm -f "$ZIP"
 cd "$STAGE"
 if command -v zip >/dev/null; then
-    zip -qr "$ZIP" "$NAME"
+    zip -qr "$TMP_ZIP" "$NAME"
 elif command -v python3 >/dev/null; then
-    python3 -m zipfile -c "$ZIP" "$NAME"
+    python3 -m zipfile -c "$TMP_ZIP" "$NAME"
 else
     # Windows: Git Bash has no zip; its Python is called python.
-    python -m zipfile -c "$ZIP" "$NAME"
+    python -m zipfile -c "$TMP_ZIP" "$NAME"
 fi
+mv -f "$TMP_ZIP" "$ZIP"
 echo "built $ZIP"

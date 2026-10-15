@@ -5,15 +5,31 @@ Removes macwin for the current user.
 .DESCRIPTION
 Stops macwin and removes start at login, the firewall rules (Windows asks for
 administrator rights once), the PATH entry and the program folder. With
--Purge it also deletes the settings, this PC's identity key and the received
+-Purge it deletes all macwin data, including settings, identity, logs and received
 files, so the computers have to pair again.
 #>
 [CmdletBinding()]
 param(
-    [string]$Destination = (Join-Path $env:LOCALAPPDATA 'Programs\macwin'),
+    [string]$Destination,
     [switch]$Purge
 )
 $ErrorActionPreference = 'Stop'
+
+function Get-DefaultDestination([string]$ScriptRoot) {
+    # The release folder ships install.ps1; installed copies do not.
+    if (Test-Path -LiteralPath (Join-Path $ScriptRoot 'install.ps1')) {
+        Join-Path $env:LOCALAPPDATA 'Programs\macwin'
+    } elseif ((Test-Path -LiteralPath (Join-Path $ScriptRoot 'macwin.exe') -PathType Leaf) -and
+              (Test-Path -LiteralPath (Join-Path $ScriptRoot 'macwin-tray.exe') -PathType Leaf)) {
+        $ScriptRoot
+    } else {
+        throw 'Cannot locate the installation. Run the installed uninstaller or pass -Destination.'
+    }
+}
+
+if (-not $PSBoundParameters.ContainsKey('Destination')) {
+    $Destination = Get-DefaultDestination $PSScriptRoot
+}
 
 function Send-SettingChange {
     # Removing a variable that does not exist changes nothing, but .NET still broadcasts
@@ -21,8 +37,34 @@ function Send-SettingChange {
     [Environment]::SetEnvironmentVariable('MACWIN_SETTING_CHANGE', $null, 'User')
 }
 
+function Test-PathWithinFolder([string]$Path, [string]$Folder) {
+    # A separator boundary avoids matching siblings such as `macwin-old`.
+    $folderPath = [IO.Path]::GetFullPath($Folder)
+    $separator = [IO.Path]::DirectorySeparatorChar
+    if ($folderPath[$folderPath.Length - 1] -ne $separator) {
+        $folderPath += $separator
+    }
+    [IO.Path]::GetFullPath($Path).StartsWith($folderPath, [StringComparison]::OrdinalIgnoreCase)
+}
+
+function Remove-ProgramFiles([string]$Folder) {
+    foreach ($file in 'macwin.exe', 'macwin-tray.exe', 'uninstall.ps1', 'README.txt', 'THIRD_PARTY_NOTICES') {
+        $path = Join-Path $Folder $file
+        if (Test-Path -LiteralPath $path -PathType Leaf) {
+            Remove-Item -LiteralPath $path -Force
+        }
+    }
+    if (Test-Path -LiteralPath $Folder -PathType Container) {
+        if (Get-ChildItem -LiteralPath $Folder -Force | Select-Object -First 1) {
+            Write-Warning 'The installation folder contains other files and has been kept.'
+        } else {
+            Remove-Item -LiteralPath $Folder -Force
+        }
+    }
+}
+
 Get-Process -Name 'macwin', 'macwin-tray' -ErrorAction SilentlyContinue |
-    Where-Object { $_.Path -and $_.Path.StartsWith($Destination, [StringComparison]::OrdinalIgnoreCase) } |
+    Where-Object { $_.Path -and (Test-PathWithinFolder $_.Path $Destination) } |
     Stop-Process -Force -PassThru |
     Wait-Process -Timeout 10 -ErrorAction SilentlyContinue
 
@@ -73,9 +115,7 @@ if ($envKey) {
 $neutral = [IO.Path]::GetTempPath()
 Set-Location -LiteralPath $neutral
 [Environment]::CurrentDirectory = $neutral
-if (Test-Path -LiteralPath $Destination) {
-    Remove-Item -LiteralPath $Destination -Recurse -Force
-}
+Remove-ProgramFiles $Destination
 if ($Purge) {
     foreach ($dir in (Join-Path $env:APPDATA 'macwin'), (Join-Path $env:LOCALAPPDATA 'macwin')) {
         if (Test-Path $dir) {

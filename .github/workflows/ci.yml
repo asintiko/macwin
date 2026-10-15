@@ -55,6 +55,10 @@ jobs:
           persist-credentials: false
       - name: Install Rust 1.96.0
         run: rustup toolchain install 1.96.0 --profile minimal
+      - name: Installer safety regressions
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: scripts/windows/tests/installer-scope.ps1
       - name: Build MacWin.app and the dmg
         if: runner.os == 'macOS'
         run: scripts/macos/dmg.sh
@@ -93,7 +97,7 @@ jobs:
           $stage = Join-Path $env:RUNNER_TEMP 'stage'
           Expand-Archive -Path (Get-Item target/macwin-*-windows-x64.zip) -DestinationPath $stage
           $installer = Get-ChildItem $stage -Recurse -Filter install.ps1 | Select-Object -First 1
-          $dest = Join-Path $env:RUNNER_TEMP 'macwin'
+          $dest = Join-Path $env:RUNNER_TEMP 'macwin custom install'
           & $installer.FullName -Destination $dest -NoStart
           Assert-UserPath $true
           $run = (Get-ItemProperty $runKey).macwin
@@ -103,7 +107,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'macwin autostart status failed' }
           # From inside the folder it removes, as "Run with PowerShell" starts it.
           $p = Start-Process powershell.exe -WorkingDirectory $dest -Wait -PassThru -NoNewWindow `
-            -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "$dest\uninstall.ps1", '-Destination', $dest
+            -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$dest\uninstall.ps1`""
           if ($p.ExitCode -ne 0) { throw "uninstall.ps1 failed with exit code $($p.ExitCode)" }
           Assert-UserPath $false
           if (Test-Path $dest) { throw 'the program folder is left' }
