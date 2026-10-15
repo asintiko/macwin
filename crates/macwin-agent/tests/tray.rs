@@ -14,6 +14,7 @@ use macwin_agent::tray::{
     self, ID_AUTOSTART, ID_CLIPBOARD, ID_PAIR_CANCEL, ID_PAIR_CODE, ID_PAIR_WAIT, ID_PAUSE,
     ID_QUIT, ID_SIDE_LEFT, ID_SIDE_RIGHT, Phase, TrayEnv, TrayShared, TrayState,
 };
+use macwin_core::arrange::Placement;
 use macwin_core::engine::Timings;
 use macwin_core::types::{CaptureFault, Os, Rect, ScreenInfo, Side};
 use macwin_net::discovery::{Offer, Responder};
@@ -163,7 +164,7 @@ fn start_peer(id: Identity, tray: Fingerprint, addr: SocketAddr) -> Peer {
             local_os: Os::Windows,
             os_version: "test".into(),
             device_name: "pc".into(),
-            peer_side: Side::Left,
+            placement: Some(Placement::side(Side::Left)),
             remap: true,
             timings: Timings::default(),
             clipboard: None,

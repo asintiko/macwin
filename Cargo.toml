@@ -30,6 +30,7 @@ macwin-net = { path = "crates/macwin-net" }
 macwin-platform = { path = "crates/macwin-platform" }
 macwin-platform-macos = { path = "crates/macwin-platform-macos" }
 macwin-platform-windows = { path = "crates/macwin-platform-windows" }
+macwin-ui = { path = "crates/macwin-ui" }
 
 # Third-party crates: exact pins (design.md §3); Cargo.lock is checked in.
 prost = "=0.14.4"
@@ -116,6 +117,11 @@ objc2-foundation = { version = "=0.3.2", default-features = false, features = [
     "NSValue",
 ] }
 security-framework = { version = "=3.7.0", default-features = false }
+# GUI: OpenGL (glow) renderer and the bundled fonts only; X11 serves Linux
+# development builds. winit is a direct dependency only for its macOS
+# extension traits and stays in lock-step with the version eframe resolves.
+eframe = { version = "=0.37.0", default-features = false, features = ["glow", "default_fonts", "x11"] }
+winit = { version = "=0.30.13", default-features = false }
 windows-sys = { version = "=0.61.2", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
