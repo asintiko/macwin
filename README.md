@@ -12,6 +12,8 @@ area app, start at login and installable packages are implemented and tested
 with fakes and in CI; the real OS backends and the tray UI still need
 testing on hardware.
 
+Current progress, verification results and remaining work: [PROGRESS.md](PROGRESS.md) (Russian).
+
 ## Workspace
 
 | Path | What it is |
