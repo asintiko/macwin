@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
+use macwin_core::arrange::Placement;
 use macwin_core::types::{Os, RoleKind, Side};
 use macwin_net::discovery::responder_addr;
 use macwin_net::pairing::{PairInfo, PairedPeer, PairingCode};
@@ -323,7 +324,7 @@ impl Controller {
             &config,
             self.env.os,
             self.env.device_name.clone(),
-            side,
+            Some(Placement::side(side)),
             self.env.staging.clone(),
         );
         let with_clipboard = session.clipboard.is_some();
