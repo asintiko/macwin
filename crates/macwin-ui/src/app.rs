@@ -261,7 +261,7 @@ fn splash(ui: &mut egui::Ui, cx: &Cx<'_>, text: &str) {
     egui::CentralPanel::default().show(ui, |ui| {
         ui.with_layout(Layout::top_down(Align::Center), |ui| {
             ui.add_space((ui.available_height() / 2.0 - 40.0).max(0.0));
-            ui.add(egui::Spinner::new().size(32.0).color(cx.pal.accent));
+            widgets::spinner(ui, &cx.pal, 34.0);
             ui.add_space(14.0);
             widgets::paragraph(ui, text, 16.0, cx.pal.muted, Align::Center);
             ui.allocate_space(vec2(0.0, 0.0));
