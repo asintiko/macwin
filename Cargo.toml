@@ -69,6 +69,7 @@ objc2-core-graphics = { version = "=0.3.2", default-features = false, features =
     "CGEventTypes",
     "CGGeometry",
     "CGRemoteOperation",
+    "CGDisplayConfiguration",
 ] }
 objc2-app-kit = { version = "=0.3.2", default-features = false, features = [
     "std",
@@ -88,6 +89,9 @@ objc2-app-kit = { version = "=0.3.2", default-features = false, features = [
     "NSPasteboardItem",
     "NSResponder",
     "NSRunningApplication",
+    "NSScreen",
+    "NSGraphics",
+    "NSWorkspace",
     "NSStatusBar",
     "NSStatusBarButton",
     "NSStatusItem",
@@ -102,11 +106,13 @@ objc2-foundation = { version = "=0.3.2", default-features = false, features = [
     "NSDate",
     "NSDictionary",
     "NSGeometry",
+    "NSNotification",
     "NSProcessInfo",
     "NSRunLoop",
     "NSString",
     "NSTimer",
     "NSURL",
+    "NSValue",
 ] }
 security-framework = { version = "=3.7.0", default-features = false }
 windows-sys = { version = "=0.61.2", features = [
