@@ -474,6 +474,7 @@ impl InputCapture for WinCapture {
             Err(_) => {
                 let tid = shared.thread_id.load(Ordering::Acquire);
                 if tid != 0 {
+                    // SAFETY: asks our own capture thread's message loop to exit.
                     unsafe {
                         PostThreadMessageW(tid, WM_QUIT, 0, 0);
                     }
