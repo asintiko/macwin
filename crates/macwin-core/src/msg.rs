@@ -76,8 +76,12 @@ pub struct Hello {
     pub device_name: String,
     /// The sender's screens in its native coordinates.
     pub screens: Vec<ScreenInfo>,
-    /// The sender's configured "peer is to my left/right", if any.
+    /// The sender's configured "peer is to my left/right", if any (legacy,
+    /// informational: `placement` supersedes it).
     pub peer_side: Option<Side>,
+    /// Where the sender placed the receiver's screens next to its own (sent
+    /// by the primary computer).
+    pub placement: Option<Placement>,
     pub agent_version: String,
 }
 
