@@ -2,7 +2,9 @@
 //! icon, shows the menu with `TrackPopupMenu` and the pairing-code prompt as
 //! a dialog built in memory (so the dialog manager handles Tab, Enter, Esc
 //! and DPI scaling); notices become notification balloons. A timer polls the
-//! agent's view. Everything runs on the calling thread.
+//! agent's view. Everything runs on the calling thread. A left click opens
+//! the app's window when it has one; another launch asks for it with a
+//! registered message ([`signal_running_instance`]).
 
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
@@ -26,9 +28,9 @@ use windows_sys::Win32::UI::Shell::{
     NOTIFYICONDATAW, Shell_NotifyIconW,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreateIconIndirect, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyIcon,
-    DestroyMenu, DestroyWindow, DialogBoxIndirectParamW, DispatchMessageW, EndDialog, GetCursorPos,
-    GetDlgItem, GetDlgItemTextW, GetMessageW, HICON, ICONINFO, IDCANCEL, IDI_APPLICATION, IDOK,
+    AllowSetForegroundWindow, AppendMenuW, CreateIconIndirect, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyIcon,
+    DestroyMenu, DestroyWindow, DialogBoxIndirectParamW, DispatchMessageW, EndDialog, FindWindowW,
+    GetCursorPos, GetDlgItem, GetDlgItemTextW, GetMessageW, GetWindowThreadProcessId, HICON, ICONINFO, IDCANCEL, IDI_APPLICATION, IDOK,
     LoadIconW, MB_ICONINFORMATION, MB_OK, MB_SETFOREGROUND, MF_CHECKED, MF_GRAYED, MF_SEPARATOR,
     MF_STRING, MSG, MessageBoxW, PostMessageW, PostQuitMessage, RegisterClassExW,
     RegisterWindowMessageW, SM_CXSMICON, SendDlgItemMessageW, SetForegroundWindow, SetTimer,
@@ -40,6 +42,10 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 
 /// The icon's callback message.
 const WM_TRAY: u32 = WM_APP + 1;
+/// The tray window's class: another launch finds the running one by it.
+const CLASS: &str = "MacwinTray";
+/// The registered message that asks the running instance for its window.
+const OPEN_MESSAGE: &str = "MacWin.OpenWindow";
 const TIMER_ID: usize = 1;
 const ICON_ID: u32 = 1;
 
@@ -72,6 +78,7 @@ struct Tray {
 thread_local! {
     static TRAY: RefCell<Option<Tray>> = const { RefCell::new(None) };
     static TASKBAR_CREATED: Cell<u32> = const { Cell::new(0) };
+    static OPEN_REQUEST: Cell<u32> = const { Cell::new(0) };
     static PROMPT_TEXT: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
@@ -276,10 +283,19 @@ fn handle(hwnd: HWND, msg: u32, lparam: LPARAM) -> Option<LRESULT> {
         }
         WM_TRAY => {
             // Without NIM_SETVERSION, lParam is the mouse message.
-            let event = (lparam & 0xFFFF) as u32;
-            if matches!(event, WM_LBUTTONUP | WM_RBUTTONUP | WM_CONTEXTMENU) {
-                show_menu(hwnd);
+            match (lparam & 0xFFFF) as u32 {
+                WM_LBUTTONUP => {
+                    if !open_window() {
+                        show_menu(hwnd);
+                    }
+                }
+                WM_RBUTTONUP | WM_CONTEXTMENU => show_menu(hwnd),
+                _ => {}
             }
+            Some(0)
+        }
+        m if m != 0 && m == OPEN_REQUEST.get() => {
+            open_window();
             Some(0)
         }
         WM_DESTROY => {
@@ -299,6 +315,13 @@ fn handle(hwnd: HWND, msg: u32, lparam: LPARAM) -> Option<LRESULT> {
         }
         _ => None,
     }
+}
+
+/// Asks the app to show its window; false when it has none.
+fn open_window() -> bool {
+    // Not under the tray borrow: the app may take a while.
+    let app = with_tray(|t| t.app.clone());
+    app.is_some_and(|app| app.open())
 }
 
 fn show_menu(hwnd: HWND) {
@@ -525,7 +548,7 @@ fn prompt(owner: HWND, request: &TextRequest) -> Option<String> {
 /// Runs the notification area icon on the calling thread until the app has
 /// finished.
 pub fn run(app: Arc<dyn TrayApp>) -> Result<(), PlatformError> {
-    let class = wide("MacwinTray");
+    let class = wide(CLASS);
     let title = wide("macwin");
     // SAFETY: plain Win32 window and message loop calls on this thread; the
     // class and title buffers outlive the calls that use them.
@@ -561,6 +584,7 @@ pub fn run(app: Arc<dyn TrayApp>) -> Result<(), PlatformError> {
             ));
         }
         TASKBAR_CREATED.set(RegisterWindowMessageW(wide("TaskbarCreated").as_ptr()));
+        OPEN_REQUEST.set(RegisterWindowMessageW(wide(OPEN_MESSAGE).as_ptr()));
         let size = GetSystemMetricsForDpi(SM_CXSMICON, GetDpiForSystem()).max(16);
         let icons = ICON_COLORS.map(|c| circle_icon(size, c));
         TRAY.with(|t| {
@@ -588,6 +612,28 @@ pub fn run(app: Arc<dyn TrayApp>) -> Result<(), PlatformError> {
         }
     }
     Ok(())
+}
+
+/// Asks an already running instance to show its window and lets it come to
+/// the foreground. True when one was found.
+pub fn signal_running_instance() -> bool {
+    let class = wide(CLASS);
+    let message = wide(OPEN_MESSAGE);
+    // SAFETY: plain Win32 calls with NUL-terminated strings that outlive
+    // them; posting to another process's window is allowed for registered
+    // messages.
+    unsafe {
+        let hwnd = FindWindowW(class.as_ptr(), ptr::null());
+        if hwnd.is_null() {
+            return false;
+        }
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(hwnd, &mut pid);
+        if pid != 0 {
+            AllowSetForegroundWindow(pid);
+        }
+        PostMessageW(hwnd, RegisterWindowMessageW(message.as_ptr()), 0, 0) != 0
+    }
 }
 
 /// A message box outside the tray (startup errors).
