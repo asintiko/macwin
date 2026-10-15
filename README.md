@@ -14,7 +14,7 @@ the real OS backends and the tray UI still need testing on physical hardware.
 
 Current progress, verification results and remaining work: [PROGRESS.md](PROGRESS.md) (Russian).
 First-run instructions and the hardware checklist: [FIRST_RUN.md](FIRST_RUN.md) (Russian).
-Test downloads: [GitHub Releases](https://github.com/kojikor/macwin/releases).
+Test downloads: [v0.1.0-test.1](https://github.com/kojikor/macwin/releases/tag/v0.1.0-test.1).
 The DMG requires macOS 15+ on Apple Silicon; the Windows ZIP contains x64 EXEs
 and `install.cmd`. These are test builds, without distribution signing/notarization.
 
