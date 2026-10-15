@@ -85,6 +85,7 @@ impl Shared {
             let was = st.grabbed;
             st.grabbed = false;
             st.lease = None;
+            st.last_pt = None;
             was
         };
         if was {
@@ -334,6 +335,7 @@ fn run_hooks(shared: Arc<Shared>, ready: mpsc::Sender<Result<(), PlatformError>>
                 WM_GRAB => {
                     let p = point_of(&msg);
                     SetCursorPos(p.x, p.y);
+                    shared.lock().park = p;
                     if !hider.is_null() {
                         SetWindowPos(
                             hider,
@@ -347,6 +349,7 @@ fn run_hooks(shared: Arc<Shared>, ready: mpsc::Sender<Result<(), PlatformError>>
                         // Re-position so Windows sends WM_SETCURSOR to the hider.
                         SetCursorPos(p.x, p.y);
                     }
+                    shared.lock().park = p;
                 }
                 WM_RELEASE => {
                     if !hider.is_null() {
@@ -403,7 +406,7 @@ impl CaptureControl for WinControl {
         match cmd {
             GrabCommand::Grab { exit } => {
                 st.grabbed = true;
-                st.park = exit;
+                st.park = st.last_pt.unwrap_or(exit);
                 st.lease = Some(Instant::now() + INITIAL_LEASE);
                 drop(st);
                 self.shared.post(WM_GRAB, exit);
@@ -418,6 +421,7 @@ impl CaptureControl for WinControl {
             GrabCommand::Rearm => {
                 st.grabbed = false;
                 st.lease = None;
+                st.last_pt = None;
                 drop(st);
                 self.shared.post(WM_REARM, Point::default());
             }
@@ -467,9 +471,18 @@ impl InputCapture for WinCapture {
                 let _ = handle.join();
                 Err(e)
             }
-            Err(_) => Err(PlatformError::Backend(
-                "the capture thread did not start".into(),
-            )),
+            Err(_) => {
+                let tid = shared.thread_id.load(Ordering::Acquire);
+                if tid != 0 {
+                    unsafe {
+                        PostThreadMessageW(tid, WM_QUIT, 0, 0);
+                    }
+                }
+                *ACTIVE.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                Err(PlatformError::Backend(
+                    "the capture thread did not start".into(),
+                ))
+            }
         }
     }
 }

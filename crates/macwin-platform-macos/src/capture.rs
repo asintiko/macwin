@@ -326,9 +326,13 @@ impl InputCapture for MacCapture {
                 let _ = handle.join();
                 Err(e)
             }
-            Err(_) => Err(PlatformError::Backend(
-                "the capture thread did not start".into(),
-            )),
+            Err(_) => {
+                shared.stop.store(true, Ordering::Release);
+                shared.release_locally();
+                Err(PlatformError::Backend(
+                    "the capture thread did not start".into(),
+                ))
+            }
         }
     }
 }

@@ -1,4 +1,4 @@
-# macwin
+# <img src="assets/logo.svg" width="44" height="44" align="absmiddle" alt="MacWin logo" /> MacWin (MacWin Bridge)
 
 A software KVM for one Mac and one Windows PC on the same LAN: either
 machine's keyboard and mouse can drive both screens, and copied text,
@@ -59,7 +59,7 @@ Windows CI builds natively with MSVC.
 
 ```sh
 scripts/macos/dmg.sh          # target/MacWin-<version>.dmg (builds and signs MacWin.app)
-scripts/windows/package.sh    # target/macwin-<version>-windows-x64.zip (cross-built)
+scripts/windows/package.sh    # target/MacWin-<version>-windows-x64.exe + target/macwin-<version>-windows-x64.zip
 ```
 
 CI is configured to build both and keep artifacts of the `package` jobs for
@@ -70,10 +70,15 @@ Gatekeeper and SmartScreen warn on first launch.
 
 ## Installing
 
-- **Mac:** open the dmg and drag MacWin to Applications. Open MacWin: it
-  lives in the menu bar (no Dock icon). Grant the permissions described in
+- **Mac:** open the dmg and double-click `Install MacWin.command` (or drag
+  `MacWin.app` to Applications and run `xattr -cr /Applications/MacWin.app`
+  so Gatekeeper does not show "Cannot verify MacWin"). Open MacWin: it lives
+  in the menu bar (no Dock icon). Grant the permissions described in
   [macOS permissions](#macos-app-bundle-and-permissions).
-- **Windows:** extract the zip and double-click `install.cmd` (it runs
+- **Windows (single EXE, no archive):** download `MacWin-<version>-windows-x64.exe`
+  and double-click it to start the tray icon directly (supports pairing,
+  clipboard/file sharing and "Start at Login" without extracting a ZIP).
+- **Windows (full installer ZIP):** extract the zip and double-click `install.cmd` (it runs
   `install.ps1`). It installs for the current user in
   `%LOCALAPPDATA%\Programs\macwin`, adds that folder to PATH, starts macwin
   at login, allows UDP 47800-47801 through Windows Firewall on private

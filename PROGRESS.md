@@ -23,6 +23,16 @@ CI-артефактами, контрольные суммы совпали. PR 
 
 ## Сделано в коде
 
+- [x] **Полный аудит кода и исправление найденных проблем:**
+  - В `macwin-net/src/pairing.rs`: защита одноразового кода сопряжения от холостых/оборванных подключений (код сжигается только после получения валидного `PairHello` от подключающейся стороны).
+  - В `macwin-agent/src/runner.rs`: транзиентные ошибки инициализации экранов/бэкендов переводятся в ретрай с экспоненциальным бэкоффом вместо аварийного выхода демона; в режиме прослушивания (`Listen`) неудачные рукопожатия клиентов не пересоздают бэкенды в цикле.
+  - В `macwin-platform-windows/src/capture.rs` и `macwin-platform-macos/src/capture.rs`: устранена гонка координаты `park` до `WM_GRAB`, сброс `last_pt` при локальном аварийном освобождении захвата и корректная остановка потока при таймауте старта.
+  - В `macwin-platform-macos/src/clipboard.rs`, `macwin-core/src/clipboard.rs`, `macwin-core/src/msg.rs`, `macwin-platform/src/image.rs`, `macwin-platform/src/fs.rs`, `macwin-agent/src/transfer.rs`: проверка лимита текста на macOS в байтах UTF-8, сохранение полной прозрачности в 32-битных `BI_BITFIELDS` DIB, насыщающее сложение в `FilesHeader::total_bytes()`, откат echo-сигнатуры при сбое отправки буфера обмена, проверка `symlink_metadata` перед чтением отправляемых файлов, уникальные временные файлы в `write_atomic` и принудительный `0700` в `create_private_dir`.
+- [x] **Фирменный логотип, название и иконки (`assets/`, `tools/icon-gen.py`):**
+  - Созданы векторный логотип `assets/logo.svg` (**MacWin Bridge**), нативная иконка macOS `assets/AppIcon.icns` (подключена в `Info.plist` и `MacWin.app/Contents/Resources/AppIcon.icns`) и иконка Windows `assets/app.ico`.
+- [x] **Улучшенная сборка macOS DMG (без блокировки «Не удалось проверить») и отдельный Windows `.exe` без архива:**
+  - В `scripts/macos/bundle.sh` и `scripts/macos/dmg.sh`: корректная подпись `.app` и `.dmg`, а также встроенный в DMG скрипт `Install MacWin.command`, который устанавливает `MacWin.app` в `/Applications`, снимает карантин (`xattr -cr`) и локально переподписывает бандл, чтобы macOS не выдавала окно «Не удалось проверить MacWin».
+  - В `scripts/windows/package.sh` и `crates/macwin-agent/src/autostart.rs`: сборка отдельного самодостаточного **`MacWin-0.1.0-windows-x64.exe` без архива** (запуск трея в 1 клик с поддержкой автозапуска в реестре Windows) наряду с полным ZIP-архивом.
 - [x] Защищённое сопряжение по одноразовому коду и проверка ключа партнёра.
 - [x] Передача мыши и клавиатуры, переключение через край экрана, аварийный возврат управления.
 - [x] Общий буфер: текст, изображения, файлы и папки.

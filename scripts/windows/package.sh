@@ -29,11 +29,13 @@ fi
 cargo build --release --locked -p macwin-agent --target "$TARGET"
 
 NAME="macwin-$VERSION-windows-x64"
+EXE="$ROOT/target/MacWin-$VERSION-windows-x64.exe"
 ZIP="$ROOT/target/$NAME.zip"
 TMP_ZIP="$ZIP.tmp.$$"
 STAGE="$(mktemp -d)"
 rm -f "$TMP_ZIP"
 trap 'rm -rf "$STAGE"; rm -f "$TMP_ZIP"' EXIT
+cp "target/$TARGET/release/macwin-tray.exe" "$EXE"
 mkdir "$STAGE/$NAME"
 cp "target/$TARGET/release/macwin.exe" "target/$TARGET/release/macwin-tray.exe" \
     scripts/windows/install.cmd scripts/windows/install.ps1 scripts/windows/uninstall.ps1 \
@@ -48,4 +50,4 @@ else
     python -m zipfile -c "$TMP_ZIP" "$NAME"
 fi
 mv -f "$TMP_ZIP" "$ZIP"
-echo "built $ZIP"
+echo "built $EXE and $ZIP"

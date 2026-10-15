@@ -3,3 +3,5 @@
 # Windows-only files keep CRLF in every checkout; they ship as they are.
 *.cmd text eol=crlf
 scripts/windows/README.txt text eol=crlf
+*.icns binary
+*.ico binary

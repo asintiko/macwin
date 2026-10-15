@@ -262,21 +262,58 @@ pub async fn run(
         if *stop.borrow() {
             return Ok(RunExit::Stopped);
         }
-        let backends = make_backends().context("cannot start the input backends")?;
-        let screens = backends
+        let backends = match make_backends().context("cannot start the input backends") {
+            Ok(b) => b,
+            Err(e) => {
+                on_event(RunEvent::Retrying {
+                    after: backoff,
+                    error: format!("{e:#}"),
+                });
+                if sleep_or_stop(backoff, &mut stop).await {
+                    return Ok(RunExit::Stopped);
+                }
+                backoff = (backoff * 2).min(opts.retry_max);
+                continue;
+            }
+        };
+        let screens = match backends
             .screens
             .screens()
-            .context("cannot read the screens")?;
+            .context("cannot read the screens")
+        {
+            Ok(s) => s,
+            Err(e) => {
+                on_event(RunEvent::Retrying {
+                    after: backoff,
+                    error: format!("{e:#}"),
+                });
+                if sleep_or_stop(backoff, &mut stop).await {
+                    return Ok(RunExit::Stopped);
+                }
+                backoff = (backoff * 2).min(opts.retry_max);
+                continue;
+            }
+        };
         let hello = kvm_hello(&opts.session, screens);
         let attempt: anyhow::Result<(Session, TransportRole, Option<SocketAddr>)> =
             match (&opts.mode, &listener) {
-                (Mode::Listen(_), Some(l)) => tokio::select! {
-                    r = l.accept(&hello) => match r {
-                        Ok(s) => Ok((s, TransportRole::Listener, None)),
-                        Err(NetError::EndpointClosed) => bail!("the listener closed"),
-                        Err(e) => Err(e.into()),
-                    },
-                    () = stopped(&mut stop) => return Ok(RunExit::Stopped),
+                (Mode::Listen(_), Some(l)) => loop {
+                    let accepted = tokio::select! {
+                        r = l.accept(&hello) => r,
+                        () = stopped(&mut stop) => return Ok(RunExit::Stopped),
+                    };
+                    match accepted {
+                        Ok(s) => break Ok((s, TransportRole::Listener, None)),
+                        Err(NetError::EndpointClosed) => {
+                            bail!("the listener closed")
+                        }
+                        Err(e) => {
+                            on_event(RunEvent::Retrying {
+                                after: Duration::ZERO,
+                                error: format!("{e:#}"),
+                            });
+                        }
+                    }
                 },
                 (Mode::Dial(_), _) => {
                     if backoff == retry_min {
@@ -294,6 +331,9 @@ pub async fn run(
         let (session, role, found) = match attempt {
             Ok(x) => x,
             Err(e) => {
+                if matches!(opts.mode, Mode::Listen(_)) {
+                    return Err(e);
+                }
                 let error = format!("{e:#}");
                 match opts.mode {
                     // A peer failed the handshake: keep listening.
@@ -324,7 +364,7 @@ pub async fn run(
             name: session.peer.device_name.clone(),
             remote: session.remote,
         });
-        let handle = spawn_session(
+        let handle = match spawn_session(
             opts.session.clone(),
             backends,
             Connected {
@@ -333,7 +373,21 @@ pub async fn run(
                 role,
             },
         )
-        .context("cannot start the session")?;
+        .context("cannot start the session")
+        {
+            Ok(h) => h,
+            Err(e) => {
+                on_event(RunEvent::Retrying {
+                    after: backoff,
+                    error: format!("{e:#}"),
+                });
+                if sleep_or_stop(backoff, &mut stop).await {
+                    return Ok(RunExit::Stopped);
+                }
+                backoff = (backoff * 2).min(opts.retry_max);
+                continue;
+            }
+        };
         let stopper = handle.stopper();
         let link = handle.link();
         let mut roles = handle.role.clone();

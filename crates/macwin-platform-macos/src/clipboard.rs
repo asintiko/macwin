@@ -117,13 +117,19 @@ fn image_content(pb: &NSPasteboard, max_bytes: usize) -> ClipboardContent {
 
 /// Sizes the string before converting it, so a huge text is never copied.
 fn text_content(s: &NSString, max_text_bytes: usize) -> ClipboardContent {
-    let bytes = s.len();
-    if bytes > max_text_bytes {
+    let utf16_len = s.len();
+    if utf16_len > max_text_bytes {
+        return ClipboardContent::TooLarge {
+            bytes: utf16_len as u64,
+        };
+    }
+    let text = s.to_string();
+    if text.len() > max_text_bytes {
         ClipboardContent::TooLarge {
-            bytes: bytes as u64,
+            bytes: text.len() as u64,
         }
     } else {
-        ClipboardContent::Text(s.to_string())
+        ClipboardContent::Text(text)
     }
 }
 

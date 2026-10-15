@@ -392,6 +392,19 @@ impl ClipboardSync {
         Some(ClipboardMsg::Other { clock })
     }
 
+    /// Sending a clipboard message of version `clock` failed before reaching
+    /// the link: clear the echo signature so copying the same content again
+    /// retries the send.
+    pub fn on_send_failed(&mut self, clock: u64) {
+        let v = Version {
+            clock,
+            by_listener: self.local_is_listener,
+        };
+        if self.current == Some(v) {
+            self.shared = None;
+        }
+    }
+
     /// An accepted transfer arrived completely. True when it is still the
     /// newest content, i.e. the files should be put on the clipboard.
     pub fn on_files_received(&mut self, header: &FilesHeader) -> bool {
@@ -823,5 +836,34 @@ mod tests {
                 prop_assert_eq!(sides[1].clipboard.as_deref(), Some(newest.as_str()));
             }
         }
+    }
+
+    #[test]
+    fn failed_message_send_clears_echo_guard_for_current_version() {
+        let mut a = ClipboardSync::new(TransportRole::Dialer, policy());
+        let out = a.on_local_change(LocalClipboard::Text("retry me".into()));
+        let Some(Outgoing::Msg(ClipboardMsg::Text(t))) = out.send else {
+            panic!("expected text outgoing");
+        };
+        assert_eq!(
+            a.on_local_change(LocalClipboard::Text("retry me".into()))
+                .kind,
+            LocalKind::Echo
+        );
+        a.on_send_failed(t.clock);
+        let retry = a.on_local_change(LocalClipboard::Text("retry me".into()));
+        assert_eq!(retry.kind, LocalKind::Shared);
+        assert!(retry.send.is_some());
+    }
+
+    #[test]
+    fn files_header_total_bytes_saturates_on_overflow() {
+        let header = FilesHeader {
+            clock: 1,
+            entries: vec![entry("a", u64::MAX - 10), entry("b", 100)],
+        };
+        assert_eq!(header.total_bytes(), u64::MAX);
+        let mut b = ClipboardSync::new(TransportRole::Listener, policy());
+        assert_eq!(b.on_files_offer(&header), FilesOffer::Refused);
     }
 }

@@ -205,6 +205,13 @@ pub async fn send_data(
         if entry.dir {
             continue;
         }
+        let meta = tokio::fs::symlink_metadata(source).await?;
+        if !meta.file_type().is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "a copied file was replaced by a non-regular file",
+            ));
+        }
         let file = tokio::fs::File::open(source).await?;
         let mut data = BufReader::with_capacity(COPY_BUF, file.take(entry.size));
         let copied = tokio::io::copy_buf(&mut data, out).await?;

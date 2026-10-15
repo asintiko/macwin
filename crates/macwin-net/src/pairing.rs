@@ -51,6 +51,9 @@ const EXPORTER_LABEL: &[u8] = b"EXPORTER-macwin-pairing-v1";
 const TRANSCRIPT_LABEL: &[u8] = b"macwin-pairing-v1";
 /// How long the dialer waits for the listener's close after `Done`.
 const CLOSE_WAIT: Duration = Duration::from_secs(2);
+/// Time allowed for a connecting peer to send its opening `PairHello`
+/// before the connection is dropped without burning the pairing code.
+const HELLO_WAIT: Duration = Duration::from_secs(5);
 
 /// A one-time pairing code: six decimal digits.
 #[derive(Clone, PartialEq, Eq)]
@@ -336,19 +339,44 @@ async fn exchange(
         peer_side: info.peer_side,
         spake: spake_msg,
     });
-    let own_hello = write_msg(&mut send, &hello).await?;
     // From here on the attempt has used up the code, whatever happens.
     let used = |e: NetError| match e {
         NetError::PairingFailed(_) => e,
         other => NetError::PairingFailed(other.to_string()),
     };
     let mut buf = FrameBuffer::new();
-    let peer_hello_body = read_frame(&mut recv, &mut buf).await.map_err(used)?;
-    let PairMsg::Hello(peer_hello) = decode_pair(&peer_hello_body).map_err(|e| used(e.into()))?
-    else {
-        return Err(unexpected("a pairing hello"));
+    let (own_hello, peer_hello_body, peer_hello) = match role {
+        Role::Dialer => {
+            let own_hello = write_msg(&mut send, &hello).await?;
+            let peer_hello_body = read_frame(&mut recv, &mut buf).await.map_err(used)?;
+            let PairMsg::Hello(peer_hello) =
+                decode_pair(&peer_hello_body).map_err(|e| used(e.into()))?
+            else {
+                return Err(unexpected("a pairing hello"));
+            };
+            check_versions(PROTOCOL_VERSION, peer_hello.protocol_version)
+                .map_err(|e| used(e.into()))?;
+            (own_hello, peer_hello_body, peer_hello)
+        }
+        Role::Listener => {
+            // Wait for a valid PairHello from the dialer before committing our
+            // SPAKE2 share or burning the one-time pairing code.
+            let peer_hello_body =
+                match tokio::time::timeout(HELLO_WAIT, read_frame(&mut recv, &mut buf)).await {
+                    Ok(Ok(body)) => body,
+                    Ok(Err(e)) => return Err(e),
+                    Err(_) => return Err(NetError::StreamSetup("the peer sent no pairing hello")),
+                };
+            let PairMsg::Hello(peer_hello) = decode_pair(&peer_hello_body)
+                .map_err(|_| NetError::StreamSetup("invalid pairing hello"))?
+            else {
+                return Err(NetError::StreamSetup("expected a pairing hello"));
+            };
+            check_versions(PROTOCOL_VERSION, peer_hello.protocol_version)?;
+            let own_hello = write_msg(&mut send, &hello).await.map_err(used)?;
+            (own_hello, peer_hello_body, peer_hello)
+        }
     };
-    check_versions(PROTOCOL_VERSION, peer_hello.protocol_version).map_err(|e| used(e.into()))?;
     let key = spake
         .finish(&peer_hello.spake)
         .map_err(|_| NetError::PairingFailed("invalid SPAKE2 message".into()))?;
@@ -464,5 +492,42 @@ mod tests {
         for v in variants {
             assert_ne!(v.as_ref(), base.as_ref());
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_peer_that_drops_before_hello_does_not_burn_the_code() {
+        let mac = Identity::generate().unwrap();
+        let pc = Identity::generate().unwrap();
+        let local: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let l = pair_listen(local, &pc).await.unwrap();
+        let addr = l.local_addr().unwrap();
+        let code = PairingCode::parse("123456").unwrap();
+        let info = PairInfo {
+            os: Os::Windows,
+            device_name: "pc".into(),
+            peer_side: None,
+        };
+        let server = tokio::spawn(async move {
+            let r = l.accept(&code, &info).await;
+            l.shutdown().await;
+            r
+        });
+        let endpoint = Endpoint::client(local).unwrap();
+        let conn = endpoint
+            .connect_with(tls::pairing_client_config(&mac).unwrap(), addr, CERT_NAME)
+            .unwrap()
+            .await
+            .unwrap();
+        let (mut send, _recv) = conn.open_bi().await.unwrap();
+        let _ = send.finish();
+        conn.close(VarInt::from_u32(0), b"bye");
+        let res = tokio::time::timeout(Duration::from_secs(5), server)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(&res, Err(e) if !matches!(e, NetError::PairingFailed(_))),
+            "dropping before PairHello must not burn the code: {res:?}"
+        );
     }
 }

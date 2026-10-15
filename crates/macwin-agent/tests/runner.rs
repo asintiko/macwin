@@ -249,6 +249,77 @@ async fn a_stop_while_dialing_exits_promptly() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn transient_backend_error_retries_and_connects() {
+    let mac_id = Identity::generate().unwrap();
+    let pc_id = Identity::generate().unwrap();
+    let addr: SocketAddr = format!("127.0.0.1:{}", free_port()).parse().unwrap();
+    let mut pc = listening(addr, &pc_id, mac_id.fingerprint()).await;
+
+    let (stop_tx, stop) = watch::channel(false);
+    let (events_tx, events) = mpsc::unbounded_channel();
+    let peer = pc_id.fingerprint();
+    let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let attempts_cl = attempts.clone();
+    let task = tokio::spawn(async move {
+        run(
+            RunOptions {
+                session: session(Os::MacOs, "mac", Side::Right),
+                mode: Mode::Dial(addr.to_string()),
+                peer,
+                discovery: None,
+                retry_min: Duration::from_millis(20),
+                retry_max: Duration::from_millis(80),
+                connect_timeout: Duration::from_millis(300),
+            },
+            mac_id,
+            move || {
+                let n = attempts_cl.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if n == 0 {
+                    Err(PlatformError::Backend(
+                        "display temporarily reconfiguring".into(),
+                    ))
+                } else {
+                    let (capture, _) = FakeCapture::new();
+                    let (injector, _) = FakeInjector::new();
+                    Ok(Backends {
+                        capture: Box::new(capture),
+                        injector: Box::new(injector),
+                        screens: Box::new(FakeScreens(vec![ScreenInfo {
+                            id: 1,
+                            rect: Rect::new(0, 0, 1440, 900).unwrap(),
+                            native_per_logical: 1.0,
+                            primary: true,
+                        }])),
+                        clipboard: None,
+                    })
+                }
+            },
+            move |e| {
+                let _ = events_tx.send(e);
+            },
+            stop,
+        )
+        .await
+    });
+    let mut mac = Agent {
+        events,
+        stop: stop_tx,
+        captures: Arc::new(Mutex::new(Vec::new())),
+        task,
+    };
+    mac.expect("backend retry", |e| matches!(e, RunEvent::Retrying { .. }))
+        .await;
+    mac.expect("connected after backend recovery", connected)
+        .await;
+    pc.expect("connected", connected).await;
+    assert!(attempts.load(std::sync::atomic::Ordering::SeqCst) >= 2);
+    mac.stop.send(true).unwrap();
+    pc.stop.send(true).unwrap();
+    assert_eq!(mac.finish().await, RunExit::Stopped);
+    assert_eq!(pc.finish().await, RunExit::Stopped);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn aborting_a_connected_runner_stops_its_session() {
     let mac_id = Identity::generate().unwrap();
     let pc_id = Identity::generate().unwrap();

@@ -27,9 +27,12 @@ STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
 # ditto keeps the bundle's signature and extended attributes intact.
 ditto "$APP" "$STAGE/MacWin.app"
+cp "$ROOT/scripts/macos/install.command" "$STAGE/Install MacWin.command"
+chmod +x "$STAGE/Install MacWin.command"
 cp "$ROOT/scripts/macos/first-launch.txt" "$STAGE/First Launch.txt"
 ln -s /Applications "$STAGE/Applications"
 rm -f "$DMG"
 hdiutil create -volname "MacWin $VERSION" -srcfolder "$STAGE" -fs HFS+ -format UDZO -ov "$DMG" >/dev/null
+codesign --force --timestamp=none --sign "${MACWIN_SIGN_IDENTITY:--}" "$DMG"
 hdiutil verify "$DMG" >/dev/null
 echo "built $DMG"

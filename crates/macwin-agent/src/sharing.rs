@@ -210,9 +210,11 @@ impl Sharing {
         }
     }
 
-    fn send(&self, m: ClipboardMsg) {
+    fn send(&mut self, m: ClipboardMsg) {
+        let clock = m.clock();
         if let Err(e) = self.link.send_clipboard(m) {
             debug!(error = %e, "clipboard update not sent");
+            self.sync.on_send_failed(clock);
         }
     }
 

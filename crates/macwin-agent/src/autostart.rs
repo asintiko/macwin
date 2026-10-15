@@ -224,19 +224,24 @@ fn for_executable(exe: &Path) -> anyhow::Result<Autostart> {
 
 #[cfg(windows)]
 fn for_executable(exe: &Path) -> anyhow::Result<Autostart> {
-    let tray = exe.with_file_name(TRAY_EXE);
-    anyhow::ensure!(
-        tray.is_file(),
-        "{} is missing next to {}; install macwin with install.ps1",
-        TRAY_EXE,
-        exe.display()
-    );
+    let sibling = exe.with_file_name(TRAY_EXE);
+    let target = if sibling.is_file() {
+        sibling
+    } else if exe.is_file() {
+        exe.to_path_buf()
+    } else {
+        anyhow::bail!(
+            "{} is missing next to {}; install macwin with install.ps1",
+            TRAY_EXE,
+            exe.display()
+        );
+    };
     Ok(Autostart::new(
         Box::new(RunKey {
             subkey: RUN_KEY.into(),
             name: RUN_VALUE.into(),
         }),
-        run_command(&tray),
+        run_command(&target),
     ))
 }
 

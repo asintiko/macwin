@@ -29,6 +29,7 @@ cargo build --locked --release -p macwin-agent
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp target/release/macwin "$APP/Contents/MacOS/macwin"
+cp "$ROOT/assets/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
 cp "$ROOT/THIRD_PARTY_NOTICES" "$APP/Contents/Resources/THIRD_PARTY_NOTICES"
 sed "s/@VERSION@/$VERSION/g" scripts/macos/Info.plist.in >"$APP/Contents/Info.plist"
 plutil -lint "$APP/Contents/Info.plist" >/dev/null
@@ -43,6 +44,12 @@ if [[ -z "$IDENTITY" ]]; then
     IDENTITY="-"
 fi
 
-codesign --force --options runtime --timestamp=none --sign "$IDENTITY" "$APP"
+if [[ "$IDENTITY" == "-" ]]; then
+    # Ad-hoc signature without Hardened Runtime avoids extra Gatekeeper blocks
+    # on unnotarized builds in macOS 15+.
+    codesign --force --deep --timestamp=none --sign - "$APP"
+else
+    codesign --force --deep --options runtime --timestamp=none --sign "$IDENTITY" "$APP"
+fi
 codesign --verify --strict --verbose=2 "$APP"
 echo "built $APP (version $VERSION, signed with: $IDENTITY)"

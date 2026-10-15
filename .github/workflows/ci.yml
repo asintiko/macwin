@@ -69,6 +69,8 @@ jobs:
           hdiutil attach -nobrowse -readonly -mountpoint "$mnt" target/MacWin-*.dmg
           test -L "$mnt/Applications"
           test -f "$mnt/First Launch.txt"
+          test -x "$mnt/Install MacWin.command"
+          test -f "$mnt/MacWin.app/Contents/Resources/AppIcon.icns"
           test -f "$mnt/MacWin.app/Contents/Resources/THIRD_PARTY_NOTICES"
           codesign --verify --strict --verbose=2 "$mnt/MacWin.app"
           "$mnt/MacWin.app/Contents/MacOS/macwin" --version
@@ -148,6 +150,7 @@ jobs:
           name: macwin-${{ runner.os }}
           path: |
             target/MacWin-*.dmg
+            target/MacWin-*-windows-x64.exe
             target/macwin-*-windows-x64.zip
           if-no-files-found: error
           retention-days: 14

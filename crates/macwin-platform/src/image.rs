@@ -283,8 +283,9 @@ pub fn decode_dib(dib: &[u8]) -> Result<Rgba, ImageError> {
             pixels[(y * w as usize + x) * 4..][..4].copy_from_slice(&px);
         }
     }
-    // 32-bit bitmaps very often leave the alpha byte at 0: that means opaque.
-    if bit_count == 32 && !any_alpha {
+    // 32-bit BI_RGB bitmaps (or bitfields without an explicit alpha mask)
+    // very often leave the alpha byte at 0: that means opaque.
+    if bit_count == 32 && !any_alpha && masks.is_none_or(|m| m[3] == 0) {
         for a in pixels.iter_mut().skip(3).step_by(4) {
             *a = 255;
         }
@@ -504,6 +505,23 @@ mod tests {
         let png = encode_png(&img).unwrap();
         let d = dib(2, 2, 0, BI_PNG, &[], &png);
         assert_eq!(decode_dib(&d).unwrap(), img);
+    }
+
+    #[test]
+    fn bitfields_with_alpha_mask_preserve_full_transparency() {
+        let mut masks = Vec::new();
+        for m in [0x00FF_0000u32, 0x0000_FF00, 0x0000_00FF, 0xFF00_0000] {
+            masks.extend_from_slice(&m.to_le_bytes());
+        }
+        let d = dib(
+            1,
+            1,
+            32,
+            BI_ALPHABITFIELDS,
+            &masks,
+            &0x0011_2233u32.to_le_bytes(),
+        );
+        assert_eq!(decode_dib(&d).unwrap().pixels, [0x11, 0x22, 0x33, 0x00]);
     }
 
     #[test]

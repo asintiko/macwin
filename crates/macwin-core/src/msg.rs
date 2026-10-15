@@ -218,7 +218,9 @@ pub struct FilesHeader {
 impl FilesHeader {
     /// Bytes of file data that follow the header.
     pub fn total_bytes(&self) -> u64 {
-        self.entries.iter().map(|e| e.size).sum()
+        self.entries
+            .iter()
+            .fold(0u64, |acc, e| acc.saturating_add(e.size))
     }
 }
 
