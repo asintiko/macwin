@@ -4,6 +4,7 @@ use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::time::Duration;
 
+use macwin_core::arrange::{Edge, Placement};
 use macwin_core::msg::{
     CAP_SPIKE_NET, ControlMsg, DatagramMsg, Hello, InputMsg, KeyMsg, Leave, MouseAbs, Ping,
 };
@@ -33,6 +34,12 @@ fn hello(name: &str, os: Os) -> Hello {
             primary: true,
         }],
         peer_side: Some(Side::Right),
+        // The Mac is the primary computer: it announces where it put the PC.
+        placement: (os == Os::MacOs).then_some(Placement {
+            display: Some(1),
+            edge: Edge::Left,
+            offset: Some(30),
+        }),
         agent_version: "0.1.0".into(),
     }
 }
