@@ -8,8 +8,9 @@ use std::time::{Duration, Instant};
 
 use macwin_agent::driver::{
     Backends, ClipboardSettings, Connected, SessionConfig, SessionEnd, SessionHandle, kvm_hello,
-    spawn_session,
+    peer_info, spawn_session,
 };
+use macwin_core::arrange::{Edge, Placement};
 use macwin_core::engine::{Timings, TransportRole};
 use macwin_core::msg::{ButtonMsg, Enter, InputMsg, KeyMsg};
 use macwin_core::types::{
@@ -38,12 +39,14 @@ fn screens(w: i32, h: i32) -> Vec<ScreenInfo> {
     }]
 }
 
-fn cfg(os: Os, name: &str, side: Side) -> SessionConfig {
+/// `placement` is where this machine put the other one; `None` makes it a
+/// secondary that follows the other's.
+fn cfg(os: Os, name: &str, placement: Option<Placement>) -> SessionConfig {
     SessionConfig {
         local_os: os,
         os_version: "test".into(),
         device_name: name.into(),
-        peer_side: side,
+        placement,
         remap: true,
         timings: Timings::default(),
         clipboard: None,
@@ -66,11 +69,11 @@ fn sharing(max: usize) -> Option<ClipboardSettings> {
 }
 
 fn mac_cfg() -> SessionConfig {
-    cfg(Os::MacOs, "mac", Side::Right)
+    cfg(Os::MacOs, "mac", Some(Placement::side(Side::Right)))
 }
 
 fn win_cfg() -> SessionConfig {
-    cfg(Os::Windows, "pc", Side::Left)
+    cfg(Os::Windows, "pc", Some(Placement::side(Side::Left)))
 }
 
 struct Peer {
@@ -147,15 +150,24 @@ async fn start() -> (Peer, Peer) {
 }
 
 async fn start_with(a_cfg: SessionConfig, b_cfg: SessionConfig) -> (Peer, Peer) {
-    let a_hello = kvm_hello(&a_cfg, screens(1440, 900));
-    let b_hello = kvm_hello(&b_cfg, screens(1920, 1080));
+    start_screens(a_cfg, screens(1440, 900), b_cfg, screens(1920, 1080)).await
+}
+
+async fn start_screens(
+    a_cfg: SessionConfig,
+    a_screens: Vec<ScreenInfo>,
+    b_cfg: SessionConfig,
+    b_screens: Vec<ScreenInfo>,
+) -> (Peer, Peer) {
+    let a_hello = kvm_hello(&a_cfg, a_screens.clone());
+    let b_hello = kvm_hello(&b_cfg, b_screens.clone());
     let (a, b) = sessions(a_hello.clone(), b_hello.clone()).await;
     // 1. Each side sees exactly the other's Hello.
     assert_eq!(a.peer, b_hello);
     assert_eq!(b.peer, a_hello);
     (
-        spawn_peer(a_cfg, screens(1440, 900), a, TransportRole::Dialer),
-        spawn_peer(b_cfg, screens(1920, 1080), b, TransportRole::Listener),
+        spawn_peer(a_cfg, a_screens, a, TransportRole::Dialer),
+        spawn_peer(b_cfg, b_screens, b, TransportRole::Listener),
     )
 }
 
@@ -267,9 +279,8 @@ async fn trackpad_scrolling_stays_in_pixels() {
     a.handle.shutdown();
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn crossing_from_b_to_a() {
-    let (a, b) = start().await;
+/// B pushes its cursor over its left edge onto A.
+async fn b_controls_a(a: &Peer, b: &Peer) {
     assert!(!b.capture.emit(mv(0.0, 540.0)));
     assert_eq!(b.role(), RoleKind::Controlling);
     assert_eq!(
@@ -283,6 +294,12 @@ async fn crossing_from_b_to_a() {
         a.injector.last_pos() == Some(Point::new(1439, 450))
     })
     .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn crossing_from_b_to_a() {
+    let (a, b) = start().await;
+    b_controls_a(&a, &b).await;
     // Back over the Mac's right edge: B gets its cursor back just inside its left edge.
     assert!(!b.capture.emit(delta(5.0, 0.0)));
     assert_eq!(b.role(), RoleKind::Idle);
@@ -294,6 +311,190 @@ async fn crossing_from_b_to_a() {
     );
     wait_until("A idle", || a.role() == RoleKind::Idle).await;
     b.handle.shutdown();
+}
+
+/// Both cursors cross to the other machine and come back, although only one
+/// of them was told where the screens are.
+async fn cursors_cross_both_ways(a: &Peer, b: &Peer) {
+    a_controls_b(a, b).await;
+    assert!(!a.capture.emit(delta(-5.0, 0.0)));
+    assert_eq!(a.role(), RoleKind::Idle);
+    assert_eq!(
+        a.capture.commands().last(),
+        Some(&GrabCommand::Release {
+            warp_to: Point::new(1437, 450)
+        })
+    );
+    wait_until("B idle", || b.role() == RoleKind::Idle).await;
+    b_controls_a(a, b).await;
+    assert!(!b.capture.emit(delta(5.0, 0.0)));
+    assert_eq!(b.role(), RoleKind::Idle);
+    assert_eq!(
+        b.capture.commands().last(),
+        Some(&GrabCommand::Release {
+            warp_to: Point::new(2, 540)
+        })
+    );
+    wait_until("A idle", || a.role() == RoleKind::Idle).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_secondary_pc_follows_the_primary_mac() {
+    let (a, b) = start_with(mac_cfg(), cfg(Os::Windows, "pc", None)).await;
+    cursors_cross_both_ways(&a, &b).await;
+    a.handle.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_secondary_mac_follows_the_primary_pc() {
+    let (a, b) = start_with(cfg(Os::MacOs, "mac", None), win_cfg()).await;
+    cursors_cross_both_ways(&a, &b).await;
+    a.handle.shutdown();
+}
+
+#[test]
+fn the_hello_announces_the_placement_and_the_legacy_side() {
+    let hello = |p| kvm_hello(&cfg(Os::MacOs, "mac", p), screens(1440, 900));
+    let side = Placement::side(Side::Left);
+    let h = hello(Some(side));
+    assert_eq!((h.peer_side, h.placement), (Some(Side::Left), Some(side)));
+    assert_eq!(peer_info(&h).placement, Some(side));
+    // A secondary announces neither.
+    let h = hello(None);
+    assert_eq!((h.peer_side, h.placement), (None, None));
+    assert_eq!(peer_info(&h).placement, None);
+    // Older peers only know "left/right of my outermost screen".
+    let offset = Placement {
+        display: None,
+        edge: Edge::Right,
+        offset: Some(40),
+    };
+    assert_eq!(hello(Some(offset)).peer_side, Some(Side::Right));
+    for p in [
+        Placement {
+            display: Some(1),
+            edge: Edge::Left,
+            offset: Some(0),
+        },
+        Placement {
+            display: None,
+            edge: Edge::Top,
+            offset: None,
+        },
+        Placement {
+            display: None,
+            edge: Edge::Bottom,
+            offset: Some(10),
+        },
+    ] {
+        let h = hello(Some(p));
+        assert_eq!((h.peer_side, h.placement), (None, Some(p)));
+    }
+}
+
+fn screen(id: u32, (x, y, w, h): (i32, i32, i32, i32), npl: f64) -> ScreenInfo {
+    ScreenInfo {
+        id,
+        rect: Rect::new(x, y, w, h).unwrap(),
+        native_per_logical: npl,
+        primary: id == 1,
+    }
+}
+
+/// The user's desk: a MacBook under a wide monitor, a Windows laptop at 150 %
+/// left of the MacBook. Only the Mac holds the placement; the laptop mirrors
+/// it from the Hello.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_arranged_desk_crosses_where_the_screens_touch() {
+    let desk = vec![
+        screen(1, (0, 0, 1512, 982), 1.0),
+        screen(2, (-524, -1440, 2560, 1440), 1.0),
+        screen(3, (2036, -1440, 1920, 1080), 1.0),
+    ];
+    let laptop = vec![screen(1, (0, 0, 2304, 1296), 1.5)];
+    let placement = Placement {
+        display: Some(1),
+        edge: Edge::Left,
+        offset: Some(0),
+    };
+    let (a, b) = start_screens(
+        cfg(Os::MacOs, "mac", Some(placement)),
+        desk,
+        cfg(Os::Windows, "pc", None),
+        laptop,
+    )
+    .await;
+    let near = |p: Option<Point>, x: i32, y: i32| {
+        p.is_some_and(|p| (p.x - x).abs() <= 1 && (p.y - y).abs() <= 1)
+    };
+
+    // Below the laptop the MacBook's left edge leads nowhere.
+    assert!(a.capture.emit(mv(0.0, 950.0)));
+    assert_eq!(a.role(), RoleKind::Idle);
+    // The MacBook's left edge onto the laptop's right edge (150 %: 500 -> 750).
+    assert!(!a.capture.emit(mv(0.0, 500.0)));
+    assert_eq!(
+        a.capture.commands().last(),
+        Some(&GrabCommand::Grab {
+            exit: Point::new(0, 500)
+        })
+    );
+    wait_until("laptop controlled", || b.role() == RoleKind::Controlled).await;
+    wait_until("entry on the laptop", || {
+        b.injector.last_pos() == Some(Point::new(2303, 750))
+    })
+    .await;
+    // Six Mac points are nine laptop pixels.
+    assert!(!a.capture.emit(delta(-6.0, 0.0)));
+    wait_until("motion on the laptop", || {
+        b.injector.last_pos() == Some(Point::new(2294, 750))
+    })
+    .await;
+    // Out over the laptop's right edge again.
+    assert!(!a.capture.emit(delta(40.0, 0.0)));
+    assert_eq!(a.role(), RoleKind::Idle);
+    assert!(
+        matches!(
+            a.capture.commands().last(),
+            Some(&GrabCommand::Release { warp_to }) if near(Some(warp_to), 2, 500)
+        ),
+        "{:?}",
+        a.capture.commands().last()
+    );
+    wait_until("laptop idle", || b.role() == RoleKind::Idle).await;
+
+    // The laptop's right edge onto the MacBook's left edge.
+    assert!(!b.capture.emit(mv(2303.5, 750.0)));
+    assert_eq!(
+        b.capture.commands().last(),
+        Some(&GrabCommand::Grab {
+            exit: Point::new(2303, 750)
+        })
+    );
+    wait_until("entry on the MacBook", || {
+        near(a.injector.last_pos(), 0, 500)
+    })
+    .await;
+    // Six laptop pixels are four Mac points: back out over the MacBook's edge.
+    assert!(!b.capture.emit(delta(-6.0, 0.0)));
+    assert_eq!(b.role(), RoleKind::Idle);
+    assert!(
+        matches!(
+            b.capture.commands().last(),
+            Some(&GrabCommand::Release { warp_to }) if near(Some(warp_to), 2301, 750)
+        ),
+        "{:?}",
+        b.capture.commands().last()
+    );
+    wait_until("MacBook idle", || a.role() == RoleKind::Idle).await;
+
+    // The wide monitor's bottom edge touches the laptop's top edge too.
+    assert!(!a.capture.emit(mv(-300.0, -1.0)));
+    wait_until("entry on the laptop's top row", || {
+        near(b.injector.last_pos(), 1854, 0)
+    })
+    .await;
+    a.handle.shutdown();
 }
 
 #[tokio::test(flavor = "multi_thread")]
