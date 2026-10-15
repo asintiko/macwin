@@ -11,10 +11,11 @@
 [сопряжение и работа](README.md#usage), [первый запуск и ручной чек-лист](FIRST_RUN.md).
 
 Опубликован [тестовый выпуск `v0.1.0-test.1`](https://github.com/kojikor/macwin/releases/tag/v0.1.0-test.1).
-Оба пакета собраны из коммита `7299815`: [все шесть заданий CI прошли](https://github.com/kojikor/macwin/actions/runs/38729086647),
+Все три установочных файла пересобраны из проверенного коммита `68bfcdd`: [все шесть заданий CI прошли](https://github.com/kojikor/macwin/actions/runs/38740478878),
 включая проверку отсутствия внешнего Visual C++ Runtime у Windows EXE.
 
-- [DMG для Apple Silicon, macOS 15+](https://github.com/kojikor/macwin/releases/download/v0.1.0-test.1/MacWin-0.1.0-macos-arm64.dmg).
+- [DMG для Apple Silicon, macOS 15+ (с `Install MacWin.command`, без окна «Не удалось проверить»)](https://github.com/kojikor/macwin/releases/download/v0.1.0-test.1/MacWin-0.1.0-macos-arm64.dmg).
+- [Прямой Windows x64 EXE без архива (`MacWin-0.1.0-windows-x64.exe`)](https://github.com/kojikor/macwin/releases/download/v0.1.0-test.1/MacWin-0.1.0-windows-x64.exe).
 - [Windows x64 ZIP с обоими EXE и `install.cmd`](https://github.com/kojikor/macwin/releases/download/v0.1.0-test.1/macwin-0.1.0-windows-x64.zip).
 - [Контрольные суммы SHA-256](https://github.com/kojikor/macwin/releases/download/v0.1.0-test.1/SHA256SUMS.txt).
 
