@@ -6,6 +6,7 @@
 //! Pure Rust: no I/O, no threads and no clocks (time is always passed in).
 #![forbid(unsafe_code)]
 
+pub mod arrange;
 pub mod clipboard;
 pub mod engine;
 pub mod geometry;
