@@ -13,6 +13,7 @@ automated fake-backend tests. Current native CI results are not yet confirmed;
 the real OS backends and the tray UI still need testing on hardware.
 
 Current progress, verification results and remaining work: [PROGRESS.md](PROGRESS.md) (Russian).
+First-run instructions and the hardware checklist: [FIRST_RUN.md](FIRST_RUN.md) (Russian).
 
 ## Workspace
 
@@ -58,8 +59,10 @@ scripts/macos/dmg.sh          # target/MacWin-<version>.dmg (builds and signs Ma
 scripts/windows/package.sh    # target/macwin-<version>-windows-x64.zip (cross-built)
 ```
 
-CI builds both on every push and keeps them as artifacts of the `package`
-jobs for 14 days. Neither is notarized or code-signed for distribution:
+CI is configured to build both and keep artifacts of the `package` jobs for
+14 days. Check [PROGRESS.md](PROGRESS.md) for the current CI status; configuration
+alone does not mean the packages have passed verification.
+Neither is notarized or code-signed for distribution:
 Gatekeeper and SmartScreen warn on first launch.
 
 ## Installing
