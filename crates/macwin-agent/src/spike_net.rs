@@ -39,6 +39,7 @@ pub fn spike_hello(os: Os, device_name: &str) -> Hello {
             primary: true,
         }],
         peer_side: None,
+        placement: None,
         agent_version: env!("CARGO_PKG_VERSION").into(),
     }
 }
