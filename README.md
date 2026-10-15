@@ -8,9 +8,9 @@ images and files are shared between them.
 other on the LAN), the identity key in the macOS Keychain / Windows DPAPI,
 keyboard and mouse sharing with smooth trackpad scrolling, clipboard sharing
 of text, images and files, automatic reconnects, a menu bar / notification
-area app, start at login and installable packages are implemented and tested
-with fakes and in CI; the real OS backends and the tray UI still need
-testing on hardware.
+area app, start at login and installable packages are implemented with
+automated fake-backend tests. Current native CI results are not yet confirmed;
+the real OS backends and the tray UI still need testing on hardware.
 
 Current progress, verification results and remaining work: [PROGRESS.md](PROGRESS.md) (Russian).
 
@@ -73,7 +73,9 @@ Gatekeeper and SmartScreen warn on first launch.
   at login, allows UDP 47800-47801 through Windows Firewall on private
   networks (one administrator prompt; `-AllNetworks` adds Public networks)
   and starts the notification area icon. `uninstall.ps1` removes it again;
-  `-Purge` also deletes the settings and the identity key.
+  `-Purge` also deletes settings, identity, logs and received files. The installed
+  uninstaller defaults to its own folder, including custom locations; unrelated
+  files in that folder are kept.
 
 ## Usage
 
@@ -89,6 +91,12 @@ In the menu of one machine choose **Pair with another computer…**: it shows
 a code. On the other machine choose **Enter pairing code…** and type it.
 The machines find each other on the local network; then choose where the
 other machine's screens are (**Other computer is on the left / right**).
+
+Discovery uses IPv4 broadcast and may not cross VPNs, subnets or Wi-Fi client
+isolation. If it fails, enter the address and code from the other machine's
+notice in the same dialog, for example `192.168.1.20:47800 123-456`. Both
+machines must still be reachable over the network; this does not bypass a
+firewall or client isolation.
 
 From the command line (here the PC, whose screens are to the right of the
 Mac, waits):
