@@ -1,6 +1,7 @@
-//! `config.toml` in the config directory: the paired peer and the settings
-//! of `macwin run`. Unknown keys are errors (they are usually typos), and
-//! every value is validated when the file is read.
+//! `config.toml` in the config directory: this computer's role, the paired
+//! peer, the screen arrangement and the settings of `macwin run`. Unknown
+//! keys are errors (they are usually typos), and every value is validated
+//! when the file is read.
 
 use std::fs;
 use std::io;
@@ -8,6 +9,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, anyhow, bail};
+use macwin_core::arrange::{Edge, Placement};
 use macwin_core::types::{Os, Side};
 use macwin_net::Fingerprint;
 use macwin_net::discovery::DISCOVERY_PORT;
@@ -44,7 +46,41 @@ pub struct Config {
     pub discovery_port: u16,
     pub clipboard: ClipboardConfig,
     pub peer: Option<PeerConfig>,
+    /// What this computer does in the pair; `None` until it is chosen (the
+    /// command line never needs one).
+    pub role: Option<Role>,
+    /// Where the primary computer put the peer's screens next to its own.
+    /// It outlives the pairing: a new peer takes the same place.
+    pub arrangement: Option<Placement>,
+    /// The language of the window and of the messages.
+    pub language: Language,
 }
+
+/// What a computer does in the pair.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Role {
+    /// Its keyboard and mouse control the other computer, and it owns the
+    /// screen arrangement.
+    Primary,
+    /// It is controlled from the primary computer, and shows the pairing
+    /// code.
+    Secondary,
+}
+
+/// The language of the window and of the messages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum Language {
+    /// Russian, the default.
+    #[default]
+    Ru,
+    /// English.
+    En,
+}
+
+/// A primary computer needs to know where the peer's screens are, and
+/// neither an arrangement nor the legacy `side` says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NeedsPlacement;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClipboardConfig {
@@ -96,10 +132,14 @@ impl Default for Config {
                 max_files_mb: DEFAULT_FILES_MAX_MB,
             },
             peer: None,
+            role: None,
+            arrangement: None,
+            language: Language::default(),
         }
     }
 }
 
+// Plain values come before the tables: TOML needs them first.
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 struct RawConfig {
@@ -107,9 +147,24 @@ struct RawConfig {
     remap: bool,
     discovery: bool,
     discovery_port: u16,
+    language: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    role: Option<String>,
     clipboard: RawClipboard,
     #[serde(skip_serializing_if = "Option::is_none")]
+    arrangement: Option<RawArrangement>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     peer: Option<RawPeer>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawArrangement {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    display: Option<u32>,
+    edge: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    offset: Option<i32>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -176,6 +231,55 @@ pub fn parse_side(s: &str) -> anyhow::Result<Side> {
     }
 }
 
+pub fn edge_name(edge: Edge) -> &'static str {
+    match edge {
+        Edge::Left => "left",
+        Edge::Right => "right",
+        Edge::Top => "top",
+        Edge::Bottom => "bottom",
+    }
+}
+
+pub fn parse_edge(s: &str) -> anyhow::Result<Edge> {
+    match s {
+        "left" => Ok(Edge::Left),
+        "right" => Ok(Edge::Right),
+        "top" => Ok(Edge::Top),
+        "bottom" => Ok(Edge::Bottom),
+        _ => bail!("expected \"left\", \"right\", \"top\" or \"bottom\", got {s:?}"),
+    }
+}
+
+pub fn role_name(role: Role) -> &'static str {
+    match role {
+        Role::Primary => "primary",
+        Role::Secondary => "secondary",
+    }
+}
+
+pub fn parse_role(s: &str) -> anyhow::Result<Role> {
+    match s {
+        "primary" => Ok(Role::Primary),
+        "secondary" => Ok(Role::Secondary),
+        _ => bail!("expected \"primary\" or \"secondary\", got {s:?}"),
+    }
+}
+
+pub fn language_name(language: Language) -> &'static str {
+    match language {
+        Language::Ru => "ru",
+        Language::En => "en",
+    }
+}
+
+pub fn parse_language(s: &str) -> anyhow::Result<Language> {
+    match s {
+        "ru" => Ok(Language::Ru),
+        "en" => Ok(Language::En),
+        _ => bail!("expected \"ru\" or \"en\", got {s:?}"),
+    }
+}
+
 /// `HOST`, `HOST:PORT`, `IP`, `IP:PORT` or `[IPv6]:PORT`; adds the default
 /// port when there is none.
 pub fn normalize_address(s: &str) -> anyhow::Result<String> {
@@ -238,6 +342,8 @@ impl From<&Config> for RawConfig {
             remap: c.remap,
             discovery: c.discovery,
             discovery_port: c.discovery_port,
+            language: language_name(c.language).into(),
+            role: c.role.map(|r| role_name(r).into()),
             clipboard: RawClipboard {
                 enabled: c.clipboard.enabled,
                 max_text_kb: c.clipboard.max_text_kb,
@@ -245,6 +351,11 @@ impl From<&Config> for RawConfig {
                 files: c.clipboard.files,
                 max_files_mb: c.clipboard.max_files_mb,
             },
+            arrangement: c.arrangement.map(|p| RawArrangement {
+                display: p.display,
+                edge: edge_name(p.edge).into(),
+                offset: p.offset,
+            }),
             peer: c.peer.as_ref().map(|p| RawPeer {
                 fingerprint: p.fingerprint.to_string(),
                 name: p.name.clone(),
@@ -287,11 +398,29 @@ impl TryFrom<RawConfig> for Config {
                     .context("peer.address")?,
             }),
         };
+        let arrangement = r
+            .arrangement
+            .map(|a| -> anyhow::Result<Placement> {
+                Ok(Placement {
+                    display: a.display,
+                    edge: parse_edge(&a.edge).context("arrangement.edge")?,
+                    offset: a.offset,
+                })
+            })
+            .transpose()?;
         Ok(Config {
             listen,
             remap: r.remap,
             discovery: r.discovery,
             discovery_port: check_port(r.discovery_port)?,
+            role: r
+                .role
+                .as_deref()
+                .map(parse_role)
+                .transpose()
+                .context("role")?,
+            arrangement,
+            language: parse_language(&r.language).context("language")?,
             clipboard: ClipboardConfig {
                 enabled: r.clipboard.enabled,
                 max_text_kb: check_max_kb(r.clipboard.max_text_kb)?,
@@ -337,6 +466,23 @@ impl Config {
         create_private_dir(dir).with_context(|| format!("cannot create {}", dir.display()))?;
         write_atomic(&path, self.to_toml().as_bytes(), false)
             .with_context(|| format!("cannot write {}", path.display()))
+    }
+
+    /// The placement of the peer's screens this machine announces to it: a
+    /// primary's arrangement, else the legacy `peer.side`. A secondary
+    /// announces none and follows the primary's (`Ok(None)`); a machine
+    /// without a role uses the legacy side only.
+    pub fn session_placement(&self) -> Result<Option<Placement>, NeedsPlacement> {
+        let legacy = self.peer.as_ref().and_then(|p| p.side).map(Placement::side);
+        match self.role {
+            Some(Role::Secondary) => Ok(None),
+            Some(Role::Primary) => self
+                .arrangement
+                .or(legacy)
+                .map(Some)
+                .ok_or(NeedsPlacement),
+            None => legacy.map(Some).ok_or(NeedsPlacement),
+        }
     }
 
     fn peer_mut(&mut self) -> anyhow::Result<&mut PeerConfig> {
@@ -391,10 +537,18 @@ impl Config {
                 })?;
                 self.clipboard.max_files_mb = check_max_mb(mb)?;
             }
+            "role" => {
+                self.role = if none {
+                    None
+                } else {
+                    Some(parse_role(value).context("role")?)
+                };
+            }
+            "language" => self.language = parse_language(value).context("language")?,
             _ => bail!(
                 "unknown key {key:?}; keys: side, address, listen, remap, discovery, \
                  discovery-port, clipboard, clipboard-max-kb, clipboard-images, \
-                 clipboard-files, clipboard-files-max-mb"
+                 clipboard-files, clipboard-files-max-mb, role, language"
             ),
         }
         Ok(())
