@@ -20,6 +20,8 @@ use crate::widgets::{
 };
 use crate::wizard::default_placement;
 
+/// What the status pill leaves to the role badge and the pause button.
+const PILL_NEIGHBOURS: f32 = 340.0;
 /// Room under the canvas for the legend, the caption and a warning.
 const BELOW_CANVAS: f32 = 92.0;
 /// How long a placement just sent is shown before the backend's word wins.
@@ -183,7 +185,8 @@ fn status_card(ui: &mut Ui, cx: &mut Cx<'_>, l: &mut Local) {
     let _ = l;
     card(ui, &pal, |ui| {
         ui.horizontal(|ui| {
-            pill(ui, &pal, view.tone, &view.text);
+            let room = ui.available_width() - PILL_NEIGHBOURS;
+            pill(ui, &pal, view.tone, &view.text, room);
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if pausable(&cx.st.status) {
                     let is_paused = paused(&cx.st.status);

@@ -5,12 +5,13 @@
 //! cargo run -p macwin-ui --example demo -- \
 //!     --scenario role|arrange|code|wait-code|connected|secondary|settings \
 //!     --lang ru|en --os mac|windows [--start-hidden] \
-//!     [--placement left|dell-right|macbook-right|dell-top]
+//!     [--placement left|dell-right|macbook-right|dell-top] [--quit-after SECS] \
+//!     [--status listening|connecting|retrying|paused|emergency|failed|controlling|controlled]
 //! ```
 //!
 //! Entering the code `000-000` fails, any other code pairs. With
-//! `--start-hidden` the window opens after three seconds, as if the tray icon
-//! had been clicked.
+//! `--start-hidden` the window opens after three seconds and again every six
+//! seconds, as if the tray icon had been clicked; closing the window hides it.
 
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -133,6 +134,21 @@ fn peer_of(this: Os) -> (PeerView, Vec<ScreenView>) {
             mac_desk(),
         ),
     }
+}
+
+/// A connection status named on the command line, for looking at the header.
+fn named_status(name: &str) -> Option<Status> {
+    Some(match name {
+        "listening" => Status::Listening,
+        "connecting" => Status::Connecting,
+        "retrying" => Status::Retrying("Нет ответа от компьютера (таймаут 5 с)".into()),
+        "paused" => Status::Paused,
+        "emergency" => Status::EmergencyPaused,
+        "failed" => Status::Failed("Порт 47800 уже занят другой программой".into()),
+        "controlling" => Status::Connected(Activity::Controlling),
+        "controlled" => Status::Connected(Activity::Controlled),
+        _ => return None,
+    })
 }
 
 fn initial(scenario: &str, lang: Lang, os: Os, placement: Placement) -> UiState {
@@ -341,14 +357,30 @@ fn main() -> ExitCode {
     };
     let start_hidden = args.iter().any(|a| a == "--start-hidden");
     let placement = named_placement(&arg(&args, "--placement").unwrap_or_default());
+    let status = arg(&args, "--status").and_then(|s| named_status(&s));
 
     let shared = Arc::new(Shared {
-        state: Mutex::new(initial(&scenario, lang, os, placement)),
+        state: Mutex::new({
+            let mut st = initial(&scenario, lang, os, placement);
+            if let Some(status) = status {
+                st.status = status;
+            }
+            st
+        }),
         version: AtomicU64::new(1),
         finished: AtomicBool::new(false),
         waker: Mutex::new(None),
         notices: AtomicU64::new(0),
     });
+    if let Some(secs) = arg(&args, "--quit-after").and_then(|s| s.parse::<u64>().ok()) {
+        let shared = Arc::clone(&shared);
+        thread::spawn(move || {
+            thread::sleep(Duration::from_secs(secs));
+            eprintln!("backend: shutting down");
+            shared.finished.store(true, Ordering::SeqCst);
+            shared.update(|st| st.status = Status::Quitting);
+        });
+    }
     let options = RunOptions {
         start_hidden,
         hide_on_close: start_hidden,
@@ -356,8 +388,11 @@ fn main() -> ExitCode {
             if start_hidden {
                 thread::spawn(move || {
                     thread::sleep(Duration::from_secs(3));
-                    eprintln!("tray: show the window");
-                    control.show();
+                    loop {
+                        eprintln!("tray: show the window");
+                        control.show();
+                        thread::sleep(Duration::from_secs(6));
+                    }
                 });
             }
         })),
