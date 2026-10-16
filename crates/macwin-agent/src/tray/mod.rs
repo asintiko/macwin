@@ -5,6 +5,7 @@
 //! screen.
 
 mod control;
+pub mod text;
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
