@@ -1302,7 +1302,7 @@ dependencies = [
 
 [[package]]
 name = "keymap-gen"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
 ]
@@ -1412,7 +1412,7 @@ checksum = "4050469837a6ff301cd14c1f8f24f88549e6d548f24f64e2148eb0f72cebc51f"
 
 [[package]]
 name = "macwin-agent"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1434,7 +1434,7 @@ dependencies = [
 
 [[package]]
 name = "macwin-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "proptest",
  "thiserror 2.0.21",
@@ -1443,7 +1443,7 @@ dependencies = [
 
 [[package]]
 name = "macwin-net"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "macwin-core",
@@ -1461,7 +1461,7 @@ dependencies = [
 
 [[package]]
 name = "macwin-platform"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "macwin-core",
  "png",
@@ -1472,7 +1472,7 @@ dependencies = [
 
 [[package]]
 name = "macwin-platform-macos"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "libc",
  "macwin-core",
@@ -1489,7 +1489,7 @@ dependencies = [
 
 [[package]]
 name = "macwin-platform-windows"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "macwin-core",
  "macwin-platform",
@@ -1500,7 +1500,7 @@ dependencies = [
 
 [[package]]
 name = "macwin-proto"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "macwin-core",
@@ -1511,7 +1511,7 @@ dependencies = [
 
 [[package]]
 name = "macwin-ui"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "eframe",
  "macwin-core",

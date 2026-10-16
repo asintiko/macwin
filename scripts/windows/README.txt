@@ -1,34 +1,43 @@
-macwin for Windows
+MacWin for Windows
 ==================
 
 Shares one keyboard, mouse and clipboard between this PC and a Mac on the same network.
 
 Install
 -------
+Simplest: in PowerShell run
+  powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://github.com/djjdjdkdjdvdvd/macwin/releases/latest/download/install-windows.ps1 | iex"
+
+Or from this folder:
 1. Extract this folder.
 2. Double-click install.cmd (or run: powershell -ExecutionPolicy Bypass -File install.ps1).
-   It installs macwin for this user in %LOCALAPPDATA%\Programs\macwin, adds it to PATH,
-   starts it at login, allows it through Windows Firewall on private networks (Windows asks
-   for administrator rights once) and starts it. Its icon appears in the notification area.
+   It installs MacWin for this user in %LOCALAPPDATA%\Programs\macwin, adds it to PATH and the
+   Start menu, starts it in the background at login, allows it through Windows Firewall on
+   private networks (Windows asks for administrator rights once) and opens the MacWin window.
    For a custom location, pass -Destination "path" to install.ps1; its copied uninstaller
    defaults to that folder.
 
-Pair
-----
-On one computer choose "Pair with another computer..." in the macwin menu; it shows a code.
-On the other choose "Enter pairing code..." (or run: macwin pair --code CODE).
-If LAN discovery fails, enter the address and code from the notice in that dialog,
-for example 192.168.1.20:47800 123-456. Both computers must still be reachable.
-Then tell macwin where the other screens are: "Other computer is on the left / right".
+Set up
+------
+1. On the Mac (the primary computer) choose "Primary" in the MacWin window and place this PC
+   next to its screens.
+2. Here choose "Secondary": MacWin shows a code such as 123-456.
+3. Enter the code on the Mac. Both windows then show "Connected".
+If the Mac cannot find this PC, choose "Enter the address manually" there and type the
+address shown under the code here.
+
+Closing the window keeps MacWin running in the notification area; click its icon to open the
+window again, right-click it to pause or quit.
 
 Notes
 -----
 - The network must be Private (Settings > Network & internet > Properties), or install with
-  -AllNetworks to allow macwin on Public networks too.
-- Windows SmartScreen may warn about the unsigned programs: More info > Run anyway.
+  -AllNetworks to allow MacWin on Public networks too.
+- The test build is not signed: if SmartScreen warns about a downloaded file, use the
+  PowerShell command above, or choose More info > Run anyway.
 - Emergency release: Ctrl+Alt+Shift+Esc.
 - Log: %LOCALAPPDATA%\macwin\macwin.log
 
-Uninstall: run uninstall.ps1 in the install folder. Add -Purge to delete all macwin data,
+Uninstall: run uninstall.ps1 in the install folder. Add -Purge to delete all MacWin data,
 including settings, identity, logs and received files.
 Unrelated files in the installation folder are kept; a nonempty folder is not removed.

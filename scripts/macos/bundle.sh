@@ -3,8 +3,10 @@
 #
 # macOS ties privacy permissions (Accessibility, Input Monitoring, ...) to the
 # code signature, so a STABLE identity keeps them across rebuilds:
-#   MACWIN_SIGN_IDENTITY="Apple Development: Name (TEAMID)" scripts/macos/bundle.sh
-# Without it, the first "Apple Development" identity in the keychain is used,
+#   MACWIN_SIGN_IDENTITY="Developer ID Application: Name (TEAMID)" scripts/macos/bundle.sh
+# A "Developer ID Application" identity signs for distribution: Hardened
+# Runtime and a secure timestamp, ready for notarization (dmg.sh). Without an
+# identity, the first "Apple Development" identity in the keychain is used,
 # and as a last resort an ad-hoc signature (permissions then reset on every
 # rebuild).
 set -euo pipefail
@@ -44,12 +46,19 @@ if [[ -z "$IDENTITY" ]]; then
     IDENTITY="-"
 fi
 
-if [[ "$IDENTITY" == "-" ]]; then
+case "$IDENTITY" in
+-)
     # Ad-hoc signature without Hardened Runtime avoids extra Gatekeeper blocks
     # on unnotarized builds in macOS 15+.
-    codesign --force --deep --timestamp=none --sign - "$APP"
-else
-    codesign --force --deep --options runtime --timestamp=none --sign "$IDENTITY" "$APP"
-fi
+    codesign --force --timestamp=none --sign - "$APP"
+    ;;
+"Developer ID Application:"*)
+    # Notarization needs the Hardened Runtime and a secure timestamp.
+    codesign --force --options runtime --timestamp --sign "$IDENTITY" "$APP"
+    ;;
+*)
+    codesign --force --options runtime --timestamp=none --sign "$IDENTITY" "$APP"
+    ;;
+esac
 codesign --verify --strict --verbose=2 "$APP"
 echo "built $APP (version $VERSION, signed with: $IDENTITY)"

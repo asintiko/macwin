@@ -1,19 +1,29 @@
-MacWin — first launch
+MacWin — first launch / первый запуск
 
-Requires macOS 15.0 or later.
+Requires macOS 15 or later on Apple Silicon (M1 or later).
 
-Quick install (no Gatekeeper "Cannot verify MacWin" prompt):
-  1. Drag MacWin.app to Applications (or run "Install MacWin.command").
-  2. If macOS shows "MacWin Not Opened / Apple could not verify MacWin", run in Terminal:
-       xattr -cr /Applications/MacWin.app && open /Applications/MacWin.app
-     Or go to System Settings > Privacy & Security > scroll down to Security >
-     click "Open Anyway" next to MacWin.
+Install / установка
+  Double-click "Install MacWin.command" (right-click > Open if macOS asks).
+  It copies MacWin to Applications, prepares it for this Mac and opens it.
+  Simplest of all, without the dmg, in Terminal:
+    curl -fsSL https://github.com/djjdjdkdjdvdvd/macwin/releases/latest/download/install-macos.sh | bash
 
-Allow Local Network access when macOS asks. To share keyboard and mouse,
-enable MacWin under System Settings > Privacy & Security > Accessibility and
-Input Monitoring. If macOS asks for clipboard access, allow MacWin under
-Paste from Other Apps.
+  If macOS says "Apple could not verify MacWin" (a test build dragged to
+  Applications by hand), run the installer above instead, or choose
+  System Settings > Privacy & Security > Open Anyway.
 
-This package is not universal: bundle.sh builds the default Rust target of
-the build Mac. Use an arm64 build for Apple silicon or an x86_64 build for
-Intel Macs.
+Set up / настройка
+  1. In the MacWin window choose "Primary" / «Основной» (its keyboard and
+     mouse control the other computer).
+  2. Drag the second computer to where it stands next to your screens.
+  3. On the Windows PC open MacWin and choose "Secondary" / «Вторичный»;
+     enter the code it shows here.
+
+Permissions / разрешения
+  Allow Local Network access when macOS asks. The MacWin window shows the
+  state of Accessibility and Input Monitoring and opens the right page of
+  System Settings: enable MacWin there, then reopen MacWin. If macOS asks
+  for clipboard access, allow it (Paste from Other Apps).
+
+Closing the window keeps MacWin running in the menu bar; quit it from the
+menu bar icon. Emergency release: Control+Option+Shift+Esc.
