@@ -7,7 +7,8 @@
 # to it; otherwise it downloads the dmg of the latest release with curl, which
 # does not mark it as downloaded from the internet. Then it:
 # - quits a running MacWin and waits for it to stop sharing,
-# - copies MacWin.app to /Applications and clears the quarantine attribute,
+# - copies MacWin.app to /Applications (~/Applications for a standard
+#   account) and clears the quarantine attribute,
 # - signs a test build (ad-hoc) for this Mac; a Developer ID build keeps its
 #   notarized signature,
 # - resets the Accessibility and Input Monitoring entries when the signature
@@ -21,8 +22,8 @@ set -euo pipefail
 REPO="${MACWIN_REPO:-djjdjdkdjdvdvd/macwin}"
 URL="${MACWIN_DMG_URL:-https://github.com/$REPO/releases/latest/download/MacWin-macos-arm64.dmg}"
 BUNDLE_ID="io.macwin.MacWin"
-DST="/Applications/MacWin.app"
-EXE="$DST/Contents/MacOS/macwin"
+# Any running copy, wherever it was started from.
+EXE_PATTERN="MacWin.app/Contents/MacOS/macwin"
 
 say() { printf '%s\n' "$*"; }
 die() {
@@ -31,9 +32,20 @@ die() {
 }
 
 [[ "$(uname -s)" == "Darwin" ]] || die "this installer is for macOS"
-[[ "$(uname -m)" == "arm64" ]] || die "MacWin needs a Mac with Apple Silicon (M1 or later)"
+# hw.optional.arm64 also answers 1 in a Terminal running under Rosetta.
+[[ "$(sysctl -n hw.optional.arm64 2>/dev/null)" == "1" ]] ||
+    die "MacWin needs a Mac with Apple Silicon (M1 or later)"
 major="$(sw_vers -productVersion | cut -d. -f1)"
 ((major >= 15)) || die "MacWin needs macOS 15 or later (this Mac has $(sw_vers -productVersion))"
+
+APPS="/Applications"
+if [[ ! -w "$APPS" ]]; then
+    # A standard (non-admin) account cannot write /Applications.
+    APPS="$HOME/Applications"
+    mkdir -p "$APPS"
+    say "No write access to /Applications: installing into $APPS."
+fi
+DST="$APPS/MacWin.app"
 
 MNT=""
 TMP=""
@@ -81,19 +93,28 @@ if [[ -d "$DST" ]]; then
     old_hash="$(cdhash "$DST" || true)"
 fi
 
+running() { pgrep -f "$EXE_PATTERN" >/dev/null 2>&1; }
+# Waits up to $1 tenths of a second for MacWin to exit.
+wait_exit() {
+    for _ in $(seq 1 "$1"); do
+        running || return 0
+        sleep 0.1
+    done
+    ! running
+}
+
 # Quit a running MacWin the normal way, so it stops sharing and releases the
-# keyboard and mouse; force it only if it does not stop.
-if pgrep -f "$EXE" >/dev/null 2>&1; then
+# keyboard and mouse: the Quit command, then Ctrl+C (SIGINT, which MacWin
+# also handles); force it only if neither works.
+if running; then
     say "Quitting the running MacWin…"
     osascript -e "tell application id \"$BUNDLE_ID\" to quit" >/dev/null 2>&1 || true
-    for _ in $(seq 1 50); do
-        pgrep -f "$EXE" >/dev/null 2>&1 || break
-        sleep 0.2
-    done
-    if pgrep -f "$EXE" >/dev/null 2>&1; then
-        pkill -TERM -f "$EXE" 2>/dev/null || true
-        sleep 1
-        pkill -KILL -f "$EXE" 2>/dev/null || true
+    if ! wait_exit 80; then
+        pkill -INT -f "$EXE_PATTERN" 2>/dev/null || true
+        if ! wait_exit 80; then
+            pkill -KILL -f "$EXE_PATTERN" 2>/dev/null || true
+            wait_exit 20 || die "cannot quit the running MacWin; quit it from the menu bar and run this again"
+        fi
     fi
 fi
 

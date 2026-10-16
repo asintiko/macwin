@@ -25,5 +25,8 @@ Permissions / разрешения
   System Settings: enable MacWin there, then reopen MacWin. If macOS asks
   for clipboard access, allow it (Paste from Other Apps).
 
+After an update of a test build macOS asks once to let MacWin use its
+keychain item (the pairing key): choose "Always Allow".
+
 Closing the window keeps MacWin running in the menu bar; quit it from the
 menu bar icon. Emergency release: Control+Option+Shift+Esc.
