@@ -27,6 +27,7 @@ macwin-core = { workspace = true }
 macwin-proto = { workspace = true }
 macwin-net = { workspace = true }
 macwin-platform = { workspace = true }
+macwin-ui = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
 serde = { workspace = true }

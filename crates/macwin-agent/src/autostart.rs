@@ -163,8 +163,9 @@ fn xml_escape(s: &str) -> String {
         .replace('>', "&gt;")
 }
 
-/// The LaunchAgent that runs `exe tray` at login in GUI sessions. No
-/// KeepAlive: quitting the tray must stick.
+/// The LaunchAgent that runs `exe tray --background` at login in GUI
+/// sessions: the menu bar item without the window. No KeepAlive: quitting
+/// must stick.
 pub fn launch_agent_plist(exe: &Path) -> String {
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -177,6 +178,7 @@ pub fn launch_agent_plist(exe: &Path) -> String {
 	<array>
 		<string>{}</string>
 		<string>tray</string>
+		<string>--background</string>
 	</array>
 	<key>RunAtLoad</key>
 	<true/>
@@ -191,9 +193,10 @@ pub fn launch_agent_plist(exe: &Path) -> String {
     )
 }
 
-/// The `Run` value that starts `tray_exe` (quoted: paths contain spaces).
+/// The `Run` value that starts `tray_exe` without its window (quoted:
+/// paths contain spaces).
 pub fn run_command(tray_exe: &Path) -> String {
-    format!("\"{}\"", tray_exe.display())
+    format!("\"{}\" --background", tray_exe.display())
 }
 
 /// The app bundle `exe` lives in (`…/MacWin.app/Contents/MacOS/macwin`).
@@ -304,7 +307,7 @@ mod tests {
         );
         assert!(
             plist.contains(
-                "<string>/Applications/Mac &amp; Win &lt;1&gt;.app/Contents/MacOS/macwin</string>\n\t\t<string>tray</string>"
+                "<string>/Applications/Mac &amp; Win &lt;1&gt;.app/Contents/MacOS/macwin</string>\n\t\t<string>tray</string>\n\t\t<string>--background</string>"
             ),
             "{plist}"
         );
@@ -316,7 +319,7 @@ mod tests {
     fn run_commands_are_quoted() {
         assert_eq!(
             run_command(Path::new(r"C:\Users\A B\macwin-tray.exe")),
-            r#""C:\Users\A B\macwin-tray.exe""#
+            r#""C:\Users\A B\macwin-tray.exe" --background"#
         );
     }
 

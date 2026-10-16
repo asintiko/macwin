@@ -8,13 +8,14 @@ use std::time::{Duration, Instant};
 
 use macwin_agent::autostart::{Autostart, LaunchAgentFile};
 use macwin_agent::config::Config;
+use macwin_agent::config::{Language, Role};
 use macwin_agent::driver::{Backends, SessionConfig};
 use macwin_agent::runner::{Mode, RunEvent, RunExit, RunOptions, run};
 use macwin_agent::tray::{
     self, ID_AUTOSTART, ID_CLIPBOARD, ID_PAIR_CANCEL, ID_PAIR_CODE, ID_PAIR_WAIT, ID_PAUSE,
-    ID_QUIT, ID_SIDE_LEFT, ID_SIDE_RIGHT, Phase, TrayEnv, TrayShared, TrayState,
+    ID_QUIT, ID_SIDE_LEFT, ID_SIDE_RIGHT, Phase, ScreenDesc, TrayEnv, TrayShared, TrayState,
 };
-use macwin_core::arrange::Placement;
+use macwin_core::arrange::{Edge, Placement, RectF};
 use macwin_core::engine::Timings;
 use macwin_core::types::{CaptureFault, Os, Rect, ScreenInfo, Side};
 use macwin_net::discovery::{Offer, Responder};
@@ -75,6 +76,12 @@ fn start_tray(targets: Vec<SocketAddr>) -> Tray {
 }
 
 fn start_tray_as(os: Os, device_name: &str, targets: Vec<SocketAddr>) -> Tray {
+    start_tray_with(os, device_name, targets, false)
+}
+
+/// `window`: an app window runs next to the tray (notices in Russian, the
+/// window's commands).
+fn start_tray_with(os: Os, device_name: &str, targets: Vec<SocketAddr>, window: bool) -> Tray {
     let dir = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
     let listen = local(free_port());
@@ -104,6 +111,16 @@ fn start_tray_as(os: Os, device_name: &str, targets: Vec<SocketAddr>) -> Tray {
         retry_min: Duration::from_millis(50),
         retry_max: Duration::from_millis(200),
         connect_timeout: Duration::from_millis(300),
+        window,
+        screens: Arc::new(|| {
+            vec![ScreenDesc {
+                id: 1,
+                rect: RectF::new(0.0, 0.0, 1440.0, 900.0),
+                primary: true,
+                builtin: true,
+            }]
+        }),
+        permissions: None,
     };
     let (shared, controller) = tray::start(env);
     Tray {
@@ -541,4 +558,110 @@ async fn a_replacement_pairing_code_is_marked_and_cleared_on_cancel() {
         .await;
     assert_eq!(cancelled.notice, None);
     tray.quit().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn roles_pair_from_the_window_and_the_secondary_follows_the_arrangement() {
+    use macwin_ui::{Lang, Role as UiRole, UiCommand};
+
+    // The Windows laptop is the secondary: it shows a code.
+    let pc = start_tray_with(Os::Windows, "pc", vec![], true);
+    pc.wait("not paired", |s| s.phase == Phase::NotPaired).await;
+    assert_eq!(
+        pc.shared.state().local_screens.len(),
+        1,
+        "screens for the editor"
+    );
+    pc.shared.send_window(UiCommand::SetRole(UiRole::Secondary));
+    pc.shared.send_window(UiCommand::StartPairing);
+    let s = pc
+        .wait("a code", |s| {
+            matches!(s.phase, Phase::PairingWait { code: Some(_) })
+        })
+        .await;
+    assert_eq!(s.role, Some(Role::Secondary));
+    let Phase::PairingWait { code: Some(code) } = s.phase.clone() else {
+        unreachable!()
+    };
+    assert!(
+        notice_title(&s).starts_with("Адрес этого компьютера: 127.0.0.1:"),
+        "the window shows the code; the notice gives the address: {s:?}"
+    );
+
+    // The MacBook is the primary: settings, the arrangement, then the code.
+    let targets = vec![local(pc.config().discovery_port)];
+    let mac = start_tray_with(Os::MacOs, "mac", targets, true);
+    mac.wait("not paired", |s| s.phase == Phase::NotPaired)
+        .await;
+    mac.shared.send_window(UiCommand::SetRole(UiRole::Primary));
+    mac.shared.send_window(UiCommand::SetLanguage(Lang::En));
+    mac.shared.send_window(UiCommand::SetClipboard {
+        enabled: false,
+        images: false,
+        files: true,
+    });
+    mac.shared.send_window(UiCommand::SetRemap(false));
+    let placement = Placement {
+        display: Some(1),
+        edge: Edge::Left,
+        offset: Some(100),
+    };
+    mac.shared.send_window(UiCommand::SetPlacement(placement));
+    let s = mac
+        .wait("primary, placed, in English", |s| {
+            s.role == Some(Role::Primary)
+                && s.placement == Some(placement)
+                && s.language == Language::En
+                && !s.options.remap
+        })
+        .await;
+    assert!(!s.clipboard && !s.options.images && s.options.files);
+    mac.shared
+        .send_window(UiCommand::EnterCode(code.to_string()));
+
+    // Both connect without another question; the secondary learns where the
+    // primary put it.
+    let s = mac.wait("connected", connected).await;
+    assert_eq!(s.peer.as_ref().unwrap().name, "pc");
+    assert_eq!(notice_title(&s), "Paired with \"pc\"");
+    assert_eq!(s.peer_screens.len(), 1, "the peer's screens from its Hello");
+    let s = pc
+        .wait("connected with the arrangement", |s| {
+            connected(s) && s.placement == Some(placement)
+        })
+        .await;
+    assert_eq!(s.peer.as_ref().unwrap().name, "mac");
+    assert_eq!(notice_title(&s), "Сопряжено с «mac»");
+    assert_eq!(s.peer_screens[0].rect, RectF::new(0.0, 0.0, 1440.0, 900.0));
+    let (mc, pcc) = (mac.config(), pc.config());
+    assert_eq!(
+        (mc.role, mc.arrangement),
+        (Some(Role::Primary), Some(placement))
+    );
+    assert!(mc.peer.unwrap().address.is_some(), "the primary dials");
+    assert_eq!(pcc.role, Some(Role::Secondary));
+    assert_eq!(pcc.peer.unwrap().address, None, "the secondary listens");
+
+    // Pause from the window, then resume.
+    mac.shared.send_window(UiCommand::SetPaused(true));
+    mac.wait("paused", |s| s.phase == Phase::Paused).await;
+    mac.shared.send_window(UiCommand::SetPaused(false));
+    mac.wait("connected again", connected).await;
+
+    // Unpairing keeps the role and the arrangement.
+    mac.shared.send_window(UiCommand::Unpair);
+    let s = mac
+        .wait("not paired", |s| s.phase == Phase::NotPaired)
+        .await;
+    assert!(s.peer.is_none() && s.peer_screens.is_empty());
+    assert_eq!(s.placement, Some(placement));
+    let mc = mac.config();
+    assert!(mc.peer.is_none());
+    assert_eq!(
+        (mc.role, mc.arrangement),
+        (Some(Role::Primary), Some(placement))
+    );
+
+    mac.quit().await;
+    pc.quit().await;
 }

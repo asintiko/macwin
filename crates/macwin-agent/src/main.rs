@@ -15,11 +15,11 @@ fn main() -> ExitCode {
         .filter(|a| !a.to_string_lossy().starts_with("-psn_"))
         .collect();
     let result = if args.len() == 1 && launched_as_app() {
-        commands::tray()
+        commands::tray(false)
     } else {
         match Cli::parse_from(args).command {
-            // The tray runs its UI on this thread, outside any runtime.
-            Command::Tray => commands::tray(),
+            // The app runs its UI on this thread, outside any runtime.
+            Command::Tray { background } => commands::tray(background),
             command => {
                 logging::init();
                 tokio::runtime::Builder::new_multi_thread()
@@ -46,7 +46,7 @@ fn launched_as_app() -> bool {
 
 async fn run(command: Command) -> anyhow::Result<()> {
     match command {
-        Command::Tray => Err(anyhow!("the tray does not run inside the async runtime")),
+        Command::Tray { .. } => Err(anyhow!("the app does not run inside the async runtime")),
         Command::Identity => commands::identity(),
         Command::Pair(args) => commands::pair(args).await,
         Command::Unpair => commands::unpair(),

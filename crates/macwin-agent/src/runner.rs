@@ -13,9 +13,10 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
 
 use anyhow::{Context, bail};
+use macwin_core::arrange::Placement;
 use macwin_core::engine::TransportRole;
 use macwin_core::msg::Hello;
-use macwin_core::types::RoleKind;
+use macwin_core::types::{RoleKind, ScreenInfo};
 use macwin_net::discovery::{Offer, Responder, find_peer};
 use macwin_net::{Fingerprint, Identity, NetError, Session, connect, listen};
 use macwin_platform::PlatformError;
@@ -79,6 +80,10 @@ pub enum RunEvent {
     Connected {
         name: String,
         remote: SocketAddr,
+        /// The peer's screens, from its Hello.
+        screens: Vec<ScreenInfo>,
+        /// Where the peer (a primary) put this computer, from its Hello.
+        placement: Option<Placement>,
     },
     /// The peer answered a discovery query from a new address and the
     /// session there is up; later dials use that address.
@@ -363,6 +368,8 @@ pub async fn run(
         on_event(RunEvent::Connected {
             name: session.peer.device_name.clone(),
             remote: session.remote,
+            screens: session.peer.screens.clone(),
+            placement: session.peer.placement,
         });
         let handle = match spawn_session(
             opts.session.clone(),

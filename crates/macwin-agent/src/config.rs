@@ -476,11 +476,7 @@ impl Config {
         let legacy = self.peer.as_ref().and_then(|p| p.side).map(Placement::side);
         match self.role {
             Some(Role::Secondary) => Ok(None),
-            Some(Role::Primary) => self
-                .arrangement
-                .or(legacy)
-                .map(Some)
-                .ok_or(NeedsPlacement),
+            Some(Role::Primary) => self.arrangement.or(legacy).map(Some).ok_or(NeedsPlacement),
             None => legacy.map(Some).ok_or(NeedsPlacement),
         }
     }
@@ -795,7 +791,10 @@ mod tests {
         // Saving a legacy config adds the language and nothing else.
         let text = Config::default().to_toml();
         assert!(text.contains("language = \"ru\""), "{text}");
-        assert!(!text.contains("role") && !text.contains("arrangement"), "{text}");
+        assert!(
+            !text.contains("role") && !text.contains("arrangement"),
+            "{text}"
+        );
     }
 
     #[test]
@@ -826,7 +825,9 @@ mod tests {
         assert_eq!(c.arrangement, Some(Placement::side(Side::Left)));
         let text = c.to_toml();
         assert!(
-            text.contains("edge = \"left\"") && !text.contains("display") && !text.contains("offset"),
+            text.contains("edge = \"left\"")
+                && !text.contains("display")
+                && !text.contains("offset"),
             "{text}"
         );
         for edge in Edge::ALL {
@@ -887,7 +888,10 @@ mod tests {
         c.set("language", "ru").unwrap();
         assert_eq!(c.language, Language::Ru);
         assert!(c.set("language", "de").is_err());
-        assert!(c.set("language", "none").is_err(), "a language always applies");
+        assert!(
+            c.set("language", "none").is_err(),
+            "a language always applies"
+        );
         let err = c.set("colour", "red").unwrap_err().to_string();
         assert!(err.contains("role, language"), "{err}");
     }

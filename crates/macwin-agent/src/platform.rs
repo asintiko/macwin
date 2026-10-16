@@ -1,13 +1,42 @@
 //! The real backends of the host OS (macOS or Windows).
 
 use std::path::Path;
+use std::sync::Arc;
 
 use macwin_platform::{FileSecretStore, PlatformError, SecretStore};
+use tracing::debug;
 
-pub use imp::{alert, capture, clipboard, init, injector, permissions_report, run_tray, screens};
+pub use imp::{
+    alert, capture, clipboard, display_names, init, injector, open_permission_settings,
+    permissions_report, run_tray, run_window, screens, show_running_instance,
+};
 
 use crate::driver::Backends;
 use crate::identity_store::KeyStoreKind;
+use crate::tray::{PermissionProbe, ScreenDesc, describe_screens};
+
+/// This computer's screens for the arrangement editor; empty when the OS
+/// cannot list them right now.
+pub fn screen_descs() -> Vec<ScreenDesc> {
+    match screens().screens() {
+        Ok(list) => describe_screens(&list, imp::is_builtin),
+        Err(e) => {
+            debug!(error = %e, "cannot list the screens");
+            Vec::new()
+        }
+    }
+}
+
+/// The privacy permissions to watch; `None` where the OS asks for none.
+pub fn permission_probe() -> Option<PermissionProbe> {
+    imp::permissions().map(|_| Arc::new(|| imp::permissions().unwrap_or(ALL_GRANTED)) as _)
+}
+
+/// What a missing check reports (it cannot fail on macOS).
+const ALL_GRANTED: crate::tray::PermissionState = crate::tray::PermissionState {
+    accessibility: true,
+    input_monitoring: true,
+};
 
 /// All backends a KVM session needs; the clipboard only when it is shared.
 pub fn backends(with_clipboard: bool) -> Result<Backends, PlatformError> {
@@ -43,6 +72,7 @@ pub fn device_name() -> String {
 
 #[cfg(target_os = "macos")]
 mod imp {
+    use std::collections::HashMap;
     use std::path::Path;
     use std::sync::Arc;
 
@@ -50,13 +80,83 @@ mod imp {
     use macwin_platform::{
         ClipboardBackend, InputCapture, InputInjector, PlatformError, ScreenSource, SecretStore,
     };
+    use macwin_platform_macos::app::{self, PrivacyPane};
     use macwin_platform_macos::{
         KeychainStore, MacCapture, MacClipboard, MacInjector, MacScreens, permissions, tray,
     };
+    use macwin_ui::{Backend, Permission, RunOptions, WindowControl};
+    use tracing::warn;
 
     use crate::identity_store::KeyStoreKind;
+    use crate::tray::{PermissionState, TrayShared};
 
     pub fn init() {}
+
+    /// The app window on the main thread with the menu bar item in its event
+    /// loop, until the app has finished (then the process exits). Without a
+    /// window (no OpenGL) the classic menu bar item takes over.
+    pub fn run_window(shared: Arc<TrayShared>, backend: Arc<dyn Backend>, background: bool) {
+        let tray_app: Arc<dyn TrayApp> = shared.clone();
+        let opener = shared.clone();
+        let options = RunOptions {
+            start_hidden: background,
+            hide_on_close: true,
+            on_start: Some(Box::new(move |window: WindowControl| {
+                let show = window.clone();
+                opener.set_opener(Box::new(move || show.show()));
+                if let Err(e) = tray::install(tray_app) {
+                    warn!(error = %e, "cannot add the menu bar item");
+                }
+                // Finder, the Dock or `open` while MacWin runs.
+                app::on_reopen(Box::new(move || window.show()));
+            })),
+            on_visibility: Some(Box::new(|shown| {
+                app::set_dock_icon(shown);
+                if shown {
+                    app::activate();
+                }
+            })),
+        };
+        if let Err(e) = macwin_ui::run(backend, options) {
+            warn!(error = %e, "cannot open the window; the menu bar item goes on alone");
+            shared.set_window(false);
+            if let Err(e) = tray::run(shared) {
+                warn!(error = %e, "the menu bar item failed");
+            }
+        }
+    }
+
+    /// LaunchServices hands a second launch to the running app (a reopen).
+    pub fn show_running_instance() -> bool {
+        false
+    }
+
+    pub fn is_builtin(display: u32) -> bool {
+        app::is_builtin(display)
+    }
+
+    pub fn permissions() -> Option<PermissionState> {
+        let p = permissions::check();
+        Some(PermissionState {
+            accessibility: p.accessibility,
+            input_monitoring: p.listen_events,
+        })
+    }
+
+    /// Main thread only (the window's state is read there).
+    pub fn display_names() -> HashMap<u32, String> {
+        app::display_names()
+    }
+
+    pub fn open_permission_settings(p: Permission) {
+        let pane = match p {
+            Permission::Accessibility => PrivacyPane::Accessibility,
+            Permission::InputMonitoring => PrivacyPane::InputMonitoring,
+        };
+        if !app::open_privacy_settings(pane) {
+            warn!(?pane, "cannot open System Settings");
+        }
+    }
 
     /// The menu bar item; on the main thread, until the app has finished.
     pub fn run_tray(app: Arc<dyn TrayApp>) -> Result<(), PlatformError> {
@@ -128,6 +228,7 @@ mod imp {
 
 #[cfg(windows)]
 mod imp {
+    use std::collections::HashMap;
     use std::path::Path;
     use std::sync::Arc;
 
@@ -138,8 +239,70 @@ mod imp {
     use macwin_platform_windows::{
         DpapiStore, WinCapture, WinClipboard, WinInjector, WinScreens, init_dpi_awareness, tray,
     };
+    use macwin_ui::{Backend, Permission, RunOptions, WindowControl};
+    use tracing::warn;
 
     use crate::identity_store::KeyStoreKind;
+    use crate::tray::{PermissionState, TrayShared};
+
+    /// The app window on this (main) thread and the notification area icon
+    /// on its own thread, until the app has finished. Without a window (no
+    /// OpenGL driver) the icon goes on with the classic menu.
+    pub fn run_window(shared: Arc<TrayShared>, backend: Arc<dyn Backend>, background: bool) {
+        let tray_app: Arc<dyn TrayApp> = shared.clone();
+        let tray_thread = std::thread::Builder::new()
+            .name("tray".into())
+            .spawn(move || tray::run(tray_app));
+        let opener = shared.clone();
+        let options = RunOptions {
+            start_hidden: background,
+            hide_on_close: true,
+            on_start: Some(Box::new(move |window: WindowControl| {
+                opener.set_opener(Box::new(move || window.show()));
+            })),
+            on_visibility: None,
+        };
+        let window = macwin_ui::run(backend, options);
+        match tray_thread {
+            Ok(thread) => {
+                if let Err(e) = window {
+                    warn!(error = %e, "cannot open the window; the tray icon goes on alone");
+                    shared.set_window(false);
+                }
+                match thread.join() {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => warn!(error = %e, "the tray icon failed"),
+                    Err(_) => warn!("the tray icon thread panicked"),
+                }
+            }
+            Err(e) => {
+                warn!(error = %e, "cannot start the tray icon thread");
+                if let Err(e) = window {
+                    warn!(error = %e, "cannot open the window either");
+                    shared.quit();
+                }
+            }
+        }
+    }
+
+    /// Asks a running MacWin to show its window.
+    pub fn show_running_instance() -> bool {
+        tray::signal_running_instance()
+    }
+
+    pub fn is_builtin(_display: u32) -> bool {
+        false
+    }
+
+    pub fn permissions() -> Option<PermissionState> {
+        None
+    }
+
+    pub fn display_names() -> HashMap<u32, String> {
+        HashMap::new()
+    }
+
+    pub fn open_permission_settings(_p: Permission) {}
 
     /// Per-monitor-v2 DPI awareness; must run before any backend is used.
     pub fn init() {
@@ -205,12 +368,40 @@ mod imp {
     };
 
     use crate::identity_store::KeyStoreKind;
+    use crate::tray::{PermissionState, TrayShared};
 
     pub fn init() {}
 
     pub fn run_tray(_app: Arc<dyn TrayApp>) -> Result<(), PlatformError> {
         Err(PlatformError::Unsupported)
     }
+
+    /// Development builds only: the app needs macOS or Windows.
+    pub fn run_window(
+        shared: Arc<TrayShared>,
+        _backend: Arc<dyn macwin_ui::Backend>,
+        _background: bool,
+    ) {
+        shared.quit();
+    }
+
+    pub fn show_running_instance() -> bool {
+        false
+    }
+
+    pub fn is_builtin(_display: u32) -> bool {
+        false
+    }
+
+    pub fn permissions() -> Option<PermissionState> {
+        None
+    }
+
+    pub fn display_names() -> std::collections::HashMap<u32, String> {
+        std::collections::HashMap::new()
+    }
+
+    pub fn open_permission_settings(_p: macwin_ui::Permission) {}
 
     pub fn alert(title: &str, message: &str) {
         eprintln!("{title}: {message}");

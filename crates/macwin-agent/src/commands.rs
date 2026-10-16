@@ -33,6 +33,7 @@ use crate::pairing::{
 use crate::runner::{self, Mode, RunDiscovery, RunEvent, RunExit, RunOptions, bind_for, resolve};
 use crate::spike_net::{self, SpikeOpts, spike_hello};
 use crate::tray::{self, DiscoveryTargets, MakeBackends, TrayEnv};
+use crate::window::WindowBackend;
 use crate::{device_name, host_os, platform};
 use crate::{instance, logging};
 
@@ -286,7 +287,7 @@ fn print_event(e: RunEvent) {
     match e {
         RunEvent::Listening(addr) => println!("listening on {addr}"),
         RunEvent::Dialing(target) => println!("connecting to {target}"),
-        RunEvent::Connected { name, remote } => println!("connected to \"{name}\" ({remote})"),
+        RunEvent::Connected { name, remote, .. } => println!("connected to \"{name}\" ({remote})"),
         RunEvent::PeerFound(addr) => println!("found the other machine at its new address {addr}"),
         RunEvent::Role(role) => info!(?role, "role"),
         RunEvent::Ended(end) => println!("session ended: {end:?}"),
@@ -309,7 +310,7 @@ fn cache_dir() -> anyhow::Result<PathBuf> {
 }
 
 const ALREADY_RUNNING: &str =
-    "macwin is already running on this machine (the tray or `macwin run`); quit it first";
+    "MacWin is already running on this computer (the app or `macwin run`); quit it first";
 
 pub async fn run() -> anyhow::Result<()> {
     let os = supported_os()?;
@@ -399,12 +400,14 @@ pub fn staging_dir() -> anyhow::Result<PathBuf> {
     Ok(cache_dir()?.join("incoming"))
 }
 
-// ---------- macwin tray ----------
+// ---------- macwin tray: the app ----------
 
-/// The tray (`macwin tray`, MacWin.app, macwin-tray.exe): the UI runs on
-/// this (main) thread, everything else on a tokio runtime. Logs go to a
-/// file; errors before the UI is up are also shown in an alert.
-pub fn tray() -> anyhow::Result<()> {
+/// The app (`macwin tray`, MacWin.app, macwin-tray.exe): the window and the
+/// menu bar item (macOS) or notification area icon (Windows) on this (main)
+/// thread, everything else on a tokio runtime. `background` (start at login)
+/// opens no window until it is asked for. Logs go to a file; errors before
+/// the UI is up are also shown in an alert.
+pub fn tray(background: bool) -> anyhow::Result<()> {
     let log = logging::log_path(|k| std::env::var_os(k));
     match &log {
         Some(path) => {
@@ -415,31 +418,39 @@ pub fn tray() -> anyhow::Result<()> {
         }
         None => logging::init(),
     }
-    let result = run_tray_app();
+    let result = run_tray_app(background);
     if let Err(e) = &result {
-        error!(error = %format!("{e:#}"), "the tray stopped");
-        platform::alert("macwin", &format!("macwin cannot start: {e:#}"));
+        error!(error = %format!("{e:#}"), "the app stopped");
+        platform::alert("MacWin", &format!("MacWin cannot start: {e:#}"));
     }
     result
 }
 
-fn run_tray_app() -> anyhow::Result<()> {
+fn run_tray_app(background: bool) -> anyhow::Result<()> {
     let os = supported_os()?;
     platform::init();
     let Some(_lock) = instance::acquire(&cache_dir()?)? else {
         info!("another macwin is running");
-        platform::alert("macwin", ALREADY_RUNNING);
+        // At login there is nothing to show; otherwise the running copy
+        // shows its window.
+        if !background && !platform::show_running_instance() {
+            platform::alert("MacWin", ALREADY_RUNNING);
+        }
         return Ok(());
     };
     let id = load_identity()?;
-    info!(version = env!("CARGO_PKG_VERSION"), "tray starting");
+    info!(
+        version = env!("CARGO_PKG_VERSION"),
+        background, "app starting"
+    );
     let make_backends: MakeBackends = Arc::new(platform::backends);
     let discovery_targets: DiscoveryTargets = Arc::new(discovery_targets);
+    let name = device_name();
     let env = TrayEnv {
         config_dir: id.config_dir,
         identity: id.identity,
         os,
-        device_name: device_name(),
+        device_name: name.clone(),
         staging: staging_dir()?,
         make_backends,
         autostart: autostart::for_this_machine().ok(),
@@ -448,6 +459,9 @@ fn run_tray_app() -> anyhow::Result<()> {
         retry_min: runner::RETRY_MIN,
         retry_max: runner::RETRY_MAX,
         connect_timeout: runner::CONNECT_TIMEOUT,
+        window: true,
+        screens: Arc::new(platform::screen_descs),
+        permissions: platform::permission_probe(),
     };
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -462,8 +476,16 @@ fn run_tray_app() -> anyhow::Result<()> {
             quitter.quit();
         }
     });
+    let backend = Arc::new(WindowBackend::new(
+        app.clone(),
+        os,
+        name,
+        Box::new(platform::display_names),
+        Box::new(platform::open_permission_settings),
+    ));
     // On macOS this ends the process once the controller has finished.
-    platform::run_tray(app.clone())?;
+    platform::run_window(app.clone(), backend, background);
+    app.quit();
     let _ = runtime.block_on(tokio::time::timeout(Duration::from_secs(5), controller));
     runtime.shutdown_timeout(Duration::from_secs(2));
     Ok(())

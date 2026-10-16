@@ -35,10 +35,15 @@ pub enum Command {
     /// Share the keyboard, mouse and clipboard with the paired machine and
     /// reconnect whenever the connection drops (Ctrl+C to stop).
     Run,
-    /// Share from the menu bar (macOS) or the notification area (Windows):
-    /// status, pause, clipboard, pairing, start at login. MacWin.app opened
-    /// without arguments and macwin-tray.exe do the same.
-    Tray,
+    /// The MacWin app: its window plus the menu bar item (macOS) or
+    /// notification area icon (Windows). MacWin.app opened without arguments
+    /// and macwin-tray.exe do the same.
+    Tray {
+        /// Start without the window (start at login); the menu bar item or
+        /// the tray icon opens it.
+        #[arg(long)]
+        background: bool,
+    },
     /// Start the tray at login (macOS LaunchAgent, Windows Run key).
     Autostart {
         #[arg(value_enum, default_value_t = AutostartArg::Status)]
@@ -373,7 +378,14 @@ mod tests {
             Command::Config(ConfigCmd::Show)
         ));
         assert!(matches!(parse(&["run"]).unwrap().command, Command::Run));
-        assert!(matches!(parse(&["tray"]).unwrap().command, Command::Tray));
+        assert!(matches!(
+            parse(&["tray"]).unwrap().command,
+            Command::Tray { background: false }
+        ));
+        assert!(matches!(
+            parse(&["tray", "--background"]).unwrap().command,
+            Command::Tray { background: true }
+        ));
         for (args, want) in [
             (&["autostart"][..], AutostartArg::Status),
             (&["autostart", "on"], AutostartArg::On),

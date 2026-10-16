@@ -22,6 +22,7 @@ pub mod runner;
 pub mod sharing;
 pub mod transfer;
 pub mod tray;
+pub mod window;
 
 /// The OS this binary runs on, if macwin supports it.
 pub fn host_os() -> Option<Os> {

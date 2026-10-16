@@ -73,11 +73,13 @@ impl Tr {
 
     /// The first line of the window-mode menu (and the tooltip).
     pub fn status(self, s: &TrayState) -> String {
-        let peer = match &s.peer {
-            Some(p) => self.quoted(&p.name),
-            None => self
-                .p("второй компьютер", "the other computer")
-                .to_string(),
+        let name = s.peer.as_ref().map(|p| self.quoted(&p.name));
+        // A quoted name stays as it is; "the other computer" declines in
+        // Russian, so each phrase brings its own case.
+        let peer = |ru: &str| match (&name, self.0) {
+            (Some(n), _) => n.clone(),
+            (None, Language::Ru) => ru.to_string(),
+            (None, Language::En) => "the other computer".to_string(),
         };
         match &s.phase {
             Phase::Starting => self.p("Запуск…", "Starting…").into(),
@@ -85,32 +87,39 @@ impl Tr {
                 .p("Компьютер не подключён", "No computer is paired")
                 .into(),
             Phase::NeedsSide => self.p("Расставьте экраны", "Arrange the screens").into(),
-            Phase::Listening => self.pick(format!("Ожидание {peer}"), format!("Waiting for {peer}")),
+            Phase::Listening => self.pick(
+                format!("Ожидание {}", peer("второго компьютера")),
+                format!("Waiting for {}", peer("")),
+            ),
             Phase::Connecting => self.pick(
-                format!("Подключение к {peer}…"),
-                format!("Connecting to {peer}…"),
+                format!("Подключение к {}…", peer("второму компьютеру")),
+                format!("Connecting to {}…", peer("")),
             ),
             Phase::Retrying(_) => self.pick(
-                format!("Нет связи с {peer}, пробую снова…"),
-                format!("Lost contact with {peer}, retrying…"),
+                format!("Нет связи с {}, пробую снова…", peer("вторым компьютером")),
+                format!("Lost contact with {}, retrying…", peer("")),
             ),
             Phase::Connected(RoleKind::Idle) => self.pick(
-                format!("Подключено к {peer}"),
-                format!("Connected to {peer}"),
+                format!("Подключено к {}", peer("второму компьютеру")),
+                format!("Connected to {}", peer("")),
             ),
             Phase::Connected(RoleKind::Controlling) => self.pick(
-                format!("Управляете {peer}"),
-                format!("You are controlling {peer}"),
+                format!("Управляете {}", peer("вторым компьютером")),
+                format!("You are controlling {}", peer("")),
             ),
-            Phase::Connected(RoleKind::Controlled) => self.pick(
-                format!("{peer} управляет этим компьютером"),
-                format!("{peer} is controlling this computer"),
-            ),
+            Phase::Connected(RoleKind::Controlled) => {
+                let who = peer("Второй компьютер");
+                self.pick(
+                    format!("{who} управляет этим компьютером"),
+                    format!("{} is controlling this computer", capitalized(&who)),
+                )
+            }
             Phase::Paused => self.p("Пауза", "Paused").into(),
             Phase::EmergencyPaused => self.p("Аварийная пауза", "Emergency pause").into(),
-            Phase::PairingWait { code: Some(code) } => {
-                self.pick(format!("Код сопряжения: {code}"), format!("Pairing code: {code}"))
-            }
+            Phase::PairingWait { code: Some(code) } => self.pick(
+                format!("Код сопряжения: {code}"),
+                format!("Pairing code: {code}"),
+            ),
             Phase::PairingWait { code: None } => self
                 .p("Подготовка к сопряжению…", "Getting ready to pair…")
                 .into(),
@@ -235,6 +244,34 @@ impl Tr {
         }
     }
 
+    /// The notice under the code in the window: the address to type when
+    /// the primary computer cannot find this one.
+    pub fn address_notice(self, address: &str, replacement: bool) -> (String, String) {
+        let title = self.pick(
+            format!("Адрес этого компьютера: {address}"),
+            format!("This computer's address: {address}"),
+        );
+        let prefix = match (self.0, replacement) {
+            (_, false) => "",
+            (Language::En, true) => "The previous code is no longer valid; use the new one. ",
+            (Language::Ru, true) => "Прежний код больше не действует; введите новый. ",
+        };
+        let body = self.p(
+            "Если основной компьютер не найдёт этот в сети, нажмите на нём «Указать адрес \
+             вручную» и введите этот адрес.",
+            "If the primary computer cannot find this one on the network, choose “Enter the \
+             address manually” there and type this address.",
+        );
+        (title, format!("{prefix}{body}"))
+    }
+
+    pub fn cannot_unpair(self) -> &'static str {
+        self.p(
+            "Не удалось отвязать компьютер",
+            "Cannot unpair the computer",
+        )
+    }
+
     /// The notice that shows a code (the classic menu; the window shows the
     /// code itself).
     pub fn pairing_code_title(self, code: &str, replacement: bool) -> String {
@@ -274,6 +311,15 @@ impl Tr {
     }
 }
 
+/// `s` with its first letter in upper case.
+fn capitalized(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) => c.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use macwin_core::types::Os;
@@ -296,7 +342,10 @@ mod tests {
     #[test]
     fn the_status_line_follows_the_language() {
         let connected = state(Phase::Connected(RoleKind::Controlling));
-        assert_eq!(Tr(Language::Ru).status(&connected), "Управляете «DESKTOP-1»");
+        assert_eq!(
+            Tr(Language::Ru).status(&connected),
+            "Управляете «DESKTOP-1»"
+        );
         assert_eq!(
             Tr(Language::En).status(&connected),
             "You are controlling “DESKTOP-1”"
@@ -307,8 +356,26 @@ mod tests {
             phase: Phase::Listening,
             ..TrayState::default()
         };
-        assert_eq!(Tr(Language::En).status(&alone), "Waiting for the other computer");
-        assert_eq!(Tr(Language::Ru).status(&alone), "Ожидание второй компьютер");
+        assert_eq!(
+            Tr(Language::En).status(&alone),
+            "Waiting for the other computer"
+        );
+        assert_eq!(
+            Tr(Language::Ru).status(&alone),
+            "Ожидание второго компьютера"
+        );
+        let controlled = TrayState {
+            phase: Phase::Connected(RoleKind::Controlled),
+            ..TrayState::default()
+        };
+        assert_eq!(
+            Tr(Language::Ru).status(&controlled),
+            "Второй компьютер управляет этим компьютером"
+        );
+        assert_eq!(
+            Tr(Language::En).status(&controlled),
+            "The other computer is controlling this computer"
+        );
     }
 
     #[test]
@@ -342,13 +409,22 @@ mod tests {
     #[test]
     fn the_pairing_code_notice_keeps_its_english_wording() {
         let en = Tr(Language::En);
-        assert_eq!(en.pairing_code_title("123-456", false), "Pairing code 123-456");
-        assert_eq!(en.pairing_code_title("123-456", true), "New pairing code 123-456");
+        assert_eq!(
+            en.pairing_code_title("123-456", false),
+            "Pairing code 123-456"
+        );
+        assert_eq!(
+            en.pairing_code_title("123-456", true),
+            "New pairing code 123-456"
+        );
         let m = en.pairing_code_message("123456", "10.0.0.2:47800", true);
         assert!(m.starts_with("The previous code is no longer valid"), "{m}");
         assert!(m.contains("10.0.0.2:47800 123456") && m.contains("macwin pair --code 123456"));
         let ru = Tr(Language::Ru).pairing_code_message("123456", "10.0.0.2:47800", false);
-        assert!(ru.contains("10.0.0.2:47800 123456") && !ru.contains("The code works"), "{ru}");
+        assert!(
+            ru.contains("10.0.0.2:47800 123456") && !ru.contains("The code works"),
+            "{ru}"
+        );
     }
 
     #[test]
@@ -356,9 +432,18 @@ mod tests {
         assert_eq!(Tr(Language::En).paired("pc"), "Paired with \"pc\"");
         assert_eq!(Tr(Language::Ru).paired("pc"), "Сопряжено с «pc»");
         let en = Tr(Language::En);
-        assert!(en.paired_message(Next::NeedsPlacement, false).contains("Choose where"));
-        assert!(en.paired_message(Next::NeedsPlacement, true).contains("window"));
-        assert!(en.paired_message(Next::OnSide(Side::Left), false).contains("on the left"));
+        assert!(
+            en.paired_message(Next::NeedsPlacement, false)
+                .contains("Choose where")
+        );
+        assert!(
+            en.paired_message(Next::NeedsPlacement, true)
+                .contains("window")
+        );
+        assert!(
+            en.paired_message(Next::OnSide(Side::Left), false)
+                .contains("on the left")
+        );
         assert!(
             Tr(Language::Ru)
                 .paired_message(Next::OnSide(Side::Right), true)

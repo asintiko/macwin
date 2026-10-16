@@ -3,6 +3,11 @@
 //! controller behind it. The OS layer in the platform crates only draws
 //! [`TrayView`]s and reports clicks; everything here is testable without a
 //! screen.
+//!
+//! With the app window, the same controller also serves the window: it
+//! takes [`macwin_ui::UiCommand`]s and the window reads the published
+//! [`TrayState`] (see `crate::window`). The menu then shrinks to "Open
+//! MacWin", the status, pause and quit.
 
 mod control;
 pub mod text;
@@ -10,14 +15,19 @@ pub mod text;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use macwin_core::types::{Os, RoleKind, Side};
+use macwin_core::arrange::{self, Placement, RectF};
+use macwin_core::geometry::ScreenSet;
+use macwin_core::types::{Os, RoleKind, ScreenInfo, Side};
 use macwin_net::pairing::PairingCode;
 use macwin_platform::tray::{
     MenuEntry, MenuItem, Notice, TextRequest, TrayApp, TrayIcon, TrayView,
 };
 use tokio::sync::mpsc;
 
-pub use control::{DiscoveryTargets, MakeBackends, TrayEnv, start};
+pub use control::{DiscoveryTargets, MakeBackends, PermissionProbe, ScreenProbe, TrayEnv, start};
+
+use crate::config::{Language, Role};
+use text::Tr;
 
 /// Pause or resume sharing.
 pub const ID_PAUSE: u32 = 1;
@@ -35,6 +45,8 @@ pub const ID_PAIR_CANCEL: u32 = 7;
 /// Start at login (on/off).
 pub const ID_AUTOSTART: u32 = 8;
 pub const ID_QUIT: u32 = 9;
+/// Show the app window (window-mode menu only).
+pub const ID_OPEN: u32 = 10;
 
 /// The paired machine, as the menu shows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,6 +54,43 @@ pub struct PeerSummary {
     pub name: String,
     pub os: Os,
     pub side: Option<Side>,
+}
+
+/// A screen in its owner's logical units (macOS points, Windows DIPs).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScreenDesc {
+    pub id: u32,
+    pub rect: RectF,
+    pub primary: bool,
+    /// A laptop's own display.
+    pub builtin: bool,
+}
+
+/// The macOS privacy permissions sharing needs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PermissionState {
+    pub accessibility: bool,
+    pub input_monitoring: bool,
+}
+
+/// Settings of `config.toml` the window can change, besides the clipboard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Options {
+    pub images: bool,
+    pub files: bool,
+    pub remap: bool,
+    pub discovery: bool,
+}
+
+impl Default for Options {
+    fn default() -> Options {
+        Options {
+            images: true,
+            files: true,
+            remap: true,
+            discovery: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,7 +121,7 @@ pub enum Phase {
     Quitting,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TrayState {
     pub phase: Phase,
     pub peer: Option<PeerSummary>,
@@ -80,6 +129,21 @@ pub struct TrayState {
     /// `None`: start at login is unavailable.
     pub autostart: Option<bool>,
     pub notice: Option<Notice>,
+    /// The notice reports a failure.
+    pub notice_error: bool,
+    /// This computer's role; `None` until it is chosen.
+    pub role: Option<Role>,
+    pub language: Language,
+    /// Primary (or no role): where this computer puts the peer's screens.
+    /// Secondary: where the primary put this computer, relative to
+    /// `peer_screens`, as its last session announced.
+    pub placement: Option<Placement>,
+    pub options: Options,
+    pub local_screens: Vec<ScreenDesc>,
+    /// The peer's screens from the last session; empty before one.
+    pub peer_screens: Vec<ScreenDesc>,
+    /// `None` where the OS asks for no permissions.
+    pub permissions: Option<PermissionState>,
 }
 
 impl Default for TrayState {
@@ -90,8 +154,33 @@ impl Default for TrayState {
             clipboard: true,
             autostart: None,
             notice: None,
+            notice_error: false,
+            role: None,
+            language: Language::default(),
+            placement: None,
+            options: Options::default(),
+            local_screens: Vec::new(),
+            peer_screens: Vec::new(),
+            permissions: None,
         }
     }
+}
+
+/// `screens` in logical units, as the arrangement editor shows them;
+/// `builtin` tells a laptop's own display by its id.
+pub fn describe_screens(screens: &[ScreenInfo], builtin: impl Fn(u32) -> bool) -> Vec<ScreenDesc> {
+    let Ok(set) = ScreenSet::new(screens.to_vec()) else {
+        return Vec::new();
+    };
+    arrange::logical_screens(&set)
+        .into_iter()
+        .map(|s| ScreenDesc {
+            id: s.id,
+            rect: s.rect,
+            primary: s.primary,
+            builtin: builtin(s.id),
+        })
+        .collect()
 }
 
 fn os_title(os: Os) -> &'static str {
@@ -180,7 +269,7 @@ pub fn render(s: &TrayState) -> TrayView {
         Phase::Paused | Phase::EmergencyPaused | Phase::Failed(_)
     );
     let side = s.peer.as_ref().and_then(|p| p.side);
-    let can_share = side.is_some() && !pairing && !quitting;
+    let can_share = sharing_possible(s) && !pairing && !quitting;
     let pause_title = if paused {
         "Resume sharing"
     } else {
@@ -246,13 +335,61 @@ pub fn render(s: &TrayState) -> TrayView {
     }
 }
 
+/// A peer is paired and placed, so pause and resume mean something.
+fn sharing_possible(s: &TrayState) -> bool {
+    s.peer.is_some()
+        && !matches!(
+            s.phase,
+            Phase::Starting | Phase::NotPaired | Phase::NeedsSide
+        )
+}
+
+/// The menu next to the app window: the status, "Open MacWin", pause and
+/// quit. Notices go to the window, so the tray shows none.
+pub fn render_window(s: &TrayState) -> TrayView {
+    let tr = Tr(s.language);
+    let status = tr.status(s);
+    let quitting = s.phase == Phase::Quitting;
+    let pairing = matches!(s.phase, Phase::PairingWait { .. } | Phase::PairingDial);
+    let paused = matches!(
+        s.phase,
+        Phase::Paused | Phase::EmergencyPaused | Phase::Failed(_)
+    );
+    let mut menu = vec![MenuEntry::Label(shorten(&status, 60))];
+    if let Phase::Retrying(e) | Phase::Failed(e) = &s.phase {
+        menu.push(MenuEntry::Label(shorten(e, 70)));
+    }
+    menu.push(MenuEntry::Separator);
+    menu.push(MenuEntry::Item(
+        MenuItem::new(ID_OPEN, tr.open()).enabled(!quitting),
+    ));
+    let pause = if paused { tr.resume() } else { tr.pause() };
+    menu.push(MenuEntry::Item(
+        MenuItem::new(ID_PAUSE, pause).enabled(sharing_possible(s) && !pairing && !quitting),
+    ));
+    menu.push(MenuEntry::Separator);
+    menu.push(MenuEntry::Item(
+        MenuItem::new(ID_QUIT, tr.quit()).enabled(!quitting),
+    ));
+    TrayView {
+        icon: icon(&s.phase),
+        tooltip: format!("MacWin: {status}"),
+        menu,
+        notice: None,
+    }
+}
+
 /// Commands from the UI thread to the controller.
 #[derive(Debug)]
 enum UiCommand {
     Click(u32),
     Entered(u32, String),
+    /// From the app window.
+    Window(macwin_ui::UiCommand),
     Quit,
 }
+
+type Callback = Box<dyn Fn() + Send + Sync>;
 
 /// What the UI thread shares with the controller: the published state and
 /// the command channel.
@@ -260,14 +397,23 @@ pub struct TrayShared {
     published: Mutex<(u64, TrayState)>,
     commands: mpsc::UnboundedSender<UiCommand>,
     finished: AtomicBool,
+    /// The app window is up: the tray shows the window-mode menu.
+    window: AtomicBool,
+    /// Wakes the window after a change.
+    waker: Mutex<Option<Callback>>,
+    /// Shows the window.
+    opener: Mutex<Option<Callback>>,
 }
 
 impl TrayShared {
-    fn new(commands: mpsc::UnboundedSender<UiCommand>) -> TrayShared {
+    fn new(commands: mpsc::UnboundedSender<UiCommand>, window: bool) -> TrayShared {
         TrayShared {
             published: Mutex::new((0, TrayState::default())),
             commands,
             finished: AtomicBool::new(false),
+            window: AtomicBool::new(window),
+            waker: Mutex::new(None),
+            opener: Mutex::new(None),
         }
     }
 
@@ -285,16 +431,59 @@ impl TrayShared {
         let _ = self.commands.send(UiCommand::Quit);
     }
 
+    /// Hands a command of the app window to the controller.
+    pub fn send_window(&self, cmd: macwin_ui::UiCommand) {
+        let _ = self.commands.send(UiCommand::Window(cmd));
+    }
+
+    /// Whether the tray serves an app window (the window-mode menu).
+    pub fn window(&self) -> bool {
+        self.window.load(Ordering::Acquire)
+    }
+
+    /// Switches to the classic menu when the window cannot open.
+    pub fn set_window(&self, on: bool) {
+        if self.window.swap(on, Ordering::AcqRel) != on {
+            // A new version makes the tray redraw in the other style.
+            self.lock().0 += 1;
+        }
+    }
+
+    /// Called after every published change (from the controller's thread).
+    pub fn set_waker(&self, waker: Callback) {
+        *self.waker.lock().unwrap_or_else(|e| e.into_inner()) = Some(waker);
+        self.wake();
+    }
+
+    /// What "Open MacWin" and a second launch do.
+    pub fn set_opener(&self, opener: Callback) {
+        *self.opener.lock().unwrap_or_else(|e| e.into_inner()) = Some(opener);
+    }
+
+    fn wake(&self) {
+        if let Some(w) = &*self.waker.lock().unwrap_or_else(|e| e.into_inner()) {
+            w();
+        }
+    }
+
     fn publish(&self, state: &TrayState) {
-        let mut p = self.lock();
-        if p.1 != *state {
-            p.0 += 1;
-            p.1 = state.clone();
+        let changed = {
+            let mut p = self.lock();
+            let changed = p.1 != *state;
+            if changed {
+                p.0 += 1;
+                p.1 = state.clone();
+            }
+            changed
+        };
+        if changed {
+            self.wake();
         }
     }
 
     fn set_finished(&self) {
         self.finished.store(true, Ordering::Release);
+        self.wake();
     }
 }
 
@@ -304,15 +493,38 @@ impl TrayApp for TrayShared {
     }
 
     fn view(&self) -> TrayView {
-        render(&self.lock().1)
+        let window = self.window();
+        let p = self.lock();
+        if window {
+            render_window(&p.1)
+        } else {
+            render(&p.1)
+        }
     }
 
     fn clicked(&self, id: u32) {
+        if id == ID_OPEN {
+            self.open();
+            return;
+        }
         let _ = self.commands.send(UiCommand::Click(id));
     }
 
     fn entered(&self, id: u32, text: String) {
         let _ = self.commands.send(UiCommand::Entered(id, text));
+    }
+
+    fn open(&self) -> bool {
+        if !self.window() {
+            return false;
+        }
+        match &*self.opener.lock().unwrap_or_else(|e| e.into_inner()) {
+            Some(open) => {
+                open();
+                true
+            }
+            None => false,
+        }
     }
 
     fn finished(&self) -> bool {
@@ -334,7 +546,7 @@ mod tests {
             }),
             clipboard: true,
             autostart: Some(false),
-            notice: None,
+            ..TrayState::default()
         }
     }
 
@@ -445,7 +657,7 @@ mod tests {
     #[test]
     fn the_shared_view_changes_version_only_on_change() {
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let shared = TrayShared::new(tx);
+        let shared = TrayShared::new(tx, false);
         let v0 = shared.version();
         let s = paired(Phase::Listening, Some(Side::Left));
         shared.publish(&s);
@@ -464,5 +676,66 @@ mod tests {
         assert!(!shared.finished());
         shared.set_finished();
         assert!(shared.finished());
+    }
+
+    #[test]
+    fn the_window_menu_opens_the_window_and_follows_the_language() {
+        let mut s = paired(Phase::Connected(RoleKind::Idle), None);
+        let v = render_window(&s);
+        assert_eq!(label(&v), "Подключено к «DESKTOP-1»");
+        assert_eq!(
+            items(&v).iter().map(|i| i.id).collect::<Vec<_>>(),
+            [ID_OPEN, ID_PAUSE, ID_QUIT]
+        );
+        assert!(
+            item(&v, ID_PAUSE).unwrap().enabled,
+            "a placed peer can pause"
+        );
+        assert_eq!(item(&v, ID_OPEN).unwrap().title, "Открыть MacWin…");
+        s.language = Language::En;
+        s.phase = Phase::Paused;
+        s.notice = Some(Notice {
+            id: 1,
+            title: "t".into(),
+            message: "m".into(),
+        });
+        let v = render_window(&s);
+        assert_eq!(item(&v, ID_PAUSE).unwrap().title, "Resume");
+        assert_eq!(v.notice, None, "the window shows notices");
+        let v = render_window(&TrayState {
+            phase: Phase::NotPaired,
+            ..TrayState::default()
+        });
+        assert!(!item(&v, ID_PAUSE).unwrap().enabled);
+    }
+
+    #[test]
+    fn the_shared_state_wakes_the_window_and_opens_it() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let shared = TrayShared::new(tx, true);
+        let woken = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let w = woken.clone();
+        shared.set_waker(Box::new(move || {
+            w.fetch_add(1, Ordering::SeqCst);
+        }));
+        let after_set = woken.load(Ordering::SeqCst);
+        shared.publish(&paired(Phase::Listening, None));
+        assert_eq!(woken.load(Ordering::SeqCst), after_set + 1);
+        assert!(!shared.open(), "no window yet");
+        let opened = std::sync::Arc::new(AtomicBool::new(false));
+        let o = opened.clone();
+        shared.set_opener(Box::new(move || o.store(true, Ordering::SeqCst)));
+        shared.clicked(ID_OPEN);
+        assert!(opened.load(Ordering::SeqCst));
+        assert!(
+            rx.try_recv().is_err(),
+            "opening is not a controller command"
+        );
+        assert_eq!(label(&shared.view()), "Ожидание «DESKTOP-1»");
+        let v = shared.version();
+        shared.set_window(false);
+        assert_ne!(shared.version(), v, "the tray redraws in the classic style");
+        assert_eq!(label(&shared.view()), "Waiting for \"DESKTOP-1\"");
+        assert!(!shared.open());
     }
 }

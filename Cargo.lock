@@ -1422,6 +1422,7 @@ dependencies = [
  "macwin-platform-macos",
  "macwin-platform-windows",
  "macwin-proto",
+ "macwin-ui",
  "png",
  "serde",
  "tempfile",

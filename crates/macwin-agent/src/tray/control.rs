@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use anyhow::Context;
 use macwin_core::arrange::Placement;
-use macwin_core::types::{Os, RoleKind, Side};
+use macwin_core::types::{Os, RoleKind, ScreenInfo, Side};
 use macwin_net::discovery::responder_addr;
 use macwin_net::pairing::{PairInfo, PairedPeer, PairingCode};
 use macwin_net::{Fingerprint, Identity, pair_connect, pair_listen};
@@ -18,15 +18,18 @@ use macwin_platform::PlatformError;
 use macwin_platform::tray::Notice;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
+use tokio::time::MissedTickBehavior;
 use tracing::{info, warn};
 
+use super::text::{Next, Tr};
 use super::{
     ID_AUTOSTART, ID_CLIPBOARD, ID_PAIR_CANCEL, ID_PAIR_CODE, ID_PAIR_WAIT, ID_PAUSE, ID_QUIT,
-    ID_SIDE_LEFT, ID_SIDE_RIGHT, PeerSummary, Phase, TrayShared, TrayState, UiCommand,
+    ID_SIDE_LEFT, ID_SIDE_RIGHT, Options, PeerSummary, PermissionState, Phase, ScreenDesc,
+    TrayShared, TrayState, UiCommand, describe_screens,
 };
 use crate::autostart::{Autostart, AutostartState};
 use crate::commands::{save_found_address, session_config};
-use crate::config::{Config, normalize_address, side_name};
+use crate::config::{Config, Language, Role, normalize_address};
 use crate::driver::Backends;
 use crate::lan::reachable_ip;
 use crate::pairing::{
@@ -41,6 +44,14 @@ use crate::runner::{
 pub type MakeBackends = Arc<dyn Fn(bool) -> Result<Backends, PlatformError> + Send + Sync>;
 /// Where discovery queries go, for a discovery port.
 pub type DiscoveryTargets = Arc<dyn Fn(u16) -> Vec<SocketAddr> + Send + Sync>;
+/// This computer's screens, for the arrangement editor.
+pub type ScreenProbe = Arc<dyn Fn() -> Vec<ScreenDesc> + Send + Sync>;
+/// The macOS privacy permissions, checked without prompting.
+pub type PermissionProbe = Arc<dyn Fn() -> PermissionState + Send + Sync>;
+
+/// How often the screens and permissions are checked again: monitors come
+/// and go, and permissions are granted in System Settings.
+const ENV_POLL: Duration = Duration::from_secs(2);
 
 /// Bound on waiting for a stopped run loop (its session drains for 2 s).
 const STOP_WAIT: Duration = Duration::from_secs(5);
@@ -61,6 +72,12 @@ pub struct TrayEnv {
     pub retry_min: Duration,
     pub retry_max: Duration,
     pub connect_timeout: Duration,
+    /// An app window runs next to the tray: notices follow the language
+    /// and point to the window.
+    pub window: bool,
+    pub screens: ScreenProbe,
+    /// `None` where the OS asks for no permissions.
+    pub permissions: Option<PermissionProbe>,
 }
 
 enum Internal {
@@ -120,7 +137,7 @@ struct Controller {
 pub fn start(env: TrayEnv) -> (Arc<TrayShared>, impl Future<Output = ()> + Send + 'static) {
     let (ui_tx, ui_rx) = mpsc::unbounded_channel();
     let (tx, rx) = mpsc::unbounded_channel();
-    let shared = Arc::new(TrayShared::new(ui_tx));
+    let shared = Arc::new(TrayShared::new(ui_tx, env.window));
     let controller = Controller {
         env,
         shared: shared.clone(),
@@ -139,6 +156,15 @@ pub fn start(env: TrayEnv) -> (Arc<TrayShared>, impl Future<Output = ()> + Send 
 fn set_side(c: &mut Config, side: Side) -> anyhow::Result<()> {
     c.peer.as_mut().context("not paired")?.side = Some(side);
     Ok(())
+}
+
+/// The placement the window shows: the primary's own (the legacy side
+/// counts), or for a secondary the one its primary announced.
+fn shown_placement(c: &Config, announced: Option<Placement>) -> Option<Placement> {
+    match c.role {
+        Some(Role::Secondary) => announced,
+        _ => c.session_placement().ok().flatten(),
+    }
 }
 
 /// Waits here for the other computer; `show` presents each code with this
@@ -223,15 +249,20 @@ impl Controller {
         mut internal: mpsc::UnboundedReceiver<Internal>,
     ) {
         self.refresh_autostart();
+        self.refresh_environment();
         self.start_sharing();
+        let mut poll = tokio::time::interval(ENV_POLL);
+        poll.set_missed_tick_behavior(MissedTickBehavior::Delay);
         while !self.quit {
             tokio::select! {
                 command = ui.recv() => match command {
                     Some(UiCommand::Click(id)) => self.clicked(id).await,
                     Some(UiCommand::Entered(id, text)) => self.entered(id, text).await,
+                    Some(UiCommand::Window(cmd)) => self.window_command(cmd).await,
                     Some(UiCommand::Quit) | None => self.quit = true,
                 },
                 Some(event) = internal.recv() => self.internal(event),
+                _ = poll.tick() => self.refresh_environment(),
             }
         }
         self.state.phase = Phase::Quitting;
@@ -251,13 +282,32 @@ impl Controller {
         self.publish();
     }
 
+    /// The texts of the notices: the window follows the language, the
+    /// classic menu stays English.
+    fn tr(&self) -> Tr {
+        Tr(if self.env.window {
+            self.state.language
+        } else {
+            Language::En
+        })
+    }
+
     fn notify(&mut self, title: impl Into<String>, message: impl Into<String>) {
+        self.show_notice(title.into(), message.into(), false);
+    }
+
+    fn notify_error(&mut self, title: impl Into<String>, message: impl Into<String>) {
+        self.show_notice(title.into(), message.into(), true);
+    }
+
+    fn show_notice(&mut self, title: String, message: String, error: bool) {
         self.notices += 1;
         self.state.notice = Some(Notice {
             id: self.notices,
-            title: title.into(),
-            message: message.into(),
+            title,
+            message,
         });
+        self.state.notice_error = error;
         self.publish();
     }
 
@@ -271,6 +321,22 @@ impl Controller {
                     side: p.side,
                 });
                 self.state.clipboard = c.clipboard.enabled;
+                self.state.role = c.role;
+                self.state.language = c.language;
+                let announced = match c.role {
+                    Some(Role::Secondary) => self.state.placement,
+                    _ => None,
+                };
+                self.state.placement = shown_placement(&c, announced);
+                self.state.options = Options {
+                    images: c.clipboard.images,
+                    files: c.clipboard.files,
+                    remap: c.remap,
+                    discovery: c.discovery,
+                };
+                if c.peer.is_none() {
+                    self.state.peer_screens.clear();
+                }
                 Some(c)
             }
             Err(e) => {
@@ -294,11 +360,23 @@ impl Controller {
         self.publish();
     }
 
+    /// Checks the screens and the permissions again.
+    fn refresh_environment(&mut self) {
+        let screens = (self.env.screens)();
+        let permissions = self.env.permissions.as_ref().map(|p| p());
+        if screens != self.state.local_screens || permissions != self.state.permissions {
+            self.state.local_screens = screens;
+            self.state.permissions = permissions;
+            self.publish();
+        }
+    }
+
     fn fail(&mut self, message: String) {
         warn!(error = %message, "sharing stopped");
         self.paused = true;
         self.state.phase = Phase::Failed(message.clone());
-        self.notify("Sharing stopped", message);
+        let title = self.tr().sharing_stopped();
+        self.notify_error(title, message);
     }
 
     /// Starts the run loop when the config and the user allow it.
@@ -309,7 +387,8 @@ impl Controller {
         let Some(peer) = config.peer.clone() else {
             return self.set_phase(Phase::NotPaired);
         };
-        let Some(side) = peer.side else {
+        // A secondary follows the placement its primary announces.
+        let Ok(placement) = config.session_placement() else {
             return self.set_phase(Phase::NeedsSide);
         };
         if self.paused {
@@ -324,7 +403,7 @@ impl Controller {
             &config,
             self.env.os,
             self.env.device_name.clone(),
-            Some(Placement::side(side)),
+            placement,
             self.env.staging.clone(),
         );
         let with_clipboard = session.clipboard.is_some();
@@ -445,7 +524,8 @@ impl Controller {
             c.save(&dir)
         });
         if let Err(e) = result {
-            return self.notify("Cannot change the setting", format!("{e:#}"));
+            let title = self.tr().cannot_change_setting();
+            return self.notify_error(title, format!("{e:#}"));
         }
         if self.pairing.is_some() {
             self.load_config();
@@ -456,18 +536,163 @@ impl Controller {
     }
 
     fn toggle_autostart(&mut self) {
+        let on = match &self.env.autostart {
+            None => return,
+            Some(a) => a.state().map(|s| s != AutostartState::On),
+        };
+        match on {
+            Ok(on) => self.set_autostart(on),
+            Err(e) => {
+                let title = self.tr().autostart();
+                self.notify_error(title, format!("{e:#}"));
+            }
+        }
+    }
+
+    fn set_autostart(&mut self, on: bool) {
         let result = match &self.env.autostart {
             None => return,
-            Some(a) => match a.state() {
-                Ok(AutostartState::On) => a.disable(),
-                Ok(_) => a.enable(),
-                Err(e) => Err(e),
-            },
+            Some(a) if on => a.enable(),
+            Some(a) => a.disable(),
         };
         if let Err(e) = result {
-            self.notify("Start at login", format!("{e:#}"));
+            let title = self.tr().autostart();
+            self.notify_error(title, format!("{e:#}"));
         }
         self.refresh_autostart();
+    }
+
+    async fn set_paused(&mut self, paused: bool) {
+        if self.pairing.is_some() || paused == self.paused {
+            return;
+        }
+        if paused {
+            self.paused = true;
+            self.stop_sharing().await;
+            self.set_phase(Phase::Paused);
+        } else {
+            self.paused = false;
+            self.start_sharing();
+        }
+    }
+
+    /// Changes the config without touching a session (the language).
+    fn save_setting(&mut self, change: impl FnOnce(&mut Config)) {
+        let dir = self.env.config_dir.clone();
+        let result = Config::load(&dir).and_then(|mut c| {
+            change(&mut c);
+            c.save(&dir)
+        });
+        if let Err(e) = result {
+            let title = self.tr().cannot_change_setting();
+            return self.notify_error(title, format!("{e:#}"));
+        }
+        self.load_config();
+        self.publish();
+    }
+
+    /// A new role ends any pairing in progress; the peer stays until a new
+    /// pairing replaces it.
+    async fn set_role(&mut self, role: Role) {
+        if self.pairing.is_some() {
+            self.cancel_pairing();
+            self.state.notice = None;
+        }
+        if role != Role::Secondary {
+            self.state.placement = None;
+        }
+        self.update_config(|c| {
+            c.role = Some(role);
+            Ok(())
+        })
+        .await;
+    }
+
+    /// Forgets the paired computer; role and arrangement stay.
+    async fn unpair(&mut self) {
+        self.cancel_pairing();
+        self.stop_sharing().await;
+        let dir = self.env.config_dir.clone();
+        let result = Config::load(&dir).and_then(|mut c| {
+            c.peer = None;
+            c.save(&dir)
+        });
+        if let Err(e) = result {
+            let title = self.tr().cannot_unpair();
+            self.notify_error(title, format!("{e:#}"));
+        } else {
+            self.state.notice = None;
+        }
+        self.paused = false;
+        self.state.peer_screens.clear();
+        if self.state.role == Some(Role::Secondary) {
+            self.state.placement = None;
+        }
+        self.start_sharing();
+    }
+
+    /// What the app window asks for.
+    async fn window_command(&mut self, cmd: macwin_ui::UiCommand) {
+        use macwin_ui::UiCommand as W;
+        match cmd {
+            W::SetRole(role) => self.set_role(role_of(role)).await,
+            W::StartPairing => self.pair_here().await,
+            W::EnterCode(text) => self.pair_with_code(text).await,
+            W::CancelPairing => {
+                if self.pairing.is_some() {
+                    self.cancel_pairing();
+                    self.state.notice = None;
+                    self.start_sharing();
+                }
+            }
+            W::SetPlacement(p) => {
+                self.update_config(|c| {
+                    c.arrangement = Some(p);
+                    Ok(())
+                })
+                .await
+            }
+            W::SetPaused(paused) => self.set_paused(paused).await,
+            W::SetClipboard {
+                enabled,
+                images,
+                files,
+            } => {
+                self.update_config(|c| {
+                    c.clipboard.enabled = enabled;
+                    c.clipboard.images = images;
+                    c.clipboard.files = files;
+                    Ok(())
+                })
+                .await
+            }
+            W::SetRemap(on) => {
+                self.update_config(|c| {
+                    c.remap = on;
+                    Ok(())
+                })
+                .await
+            }
+            W::SetDiscovery(on) => {
+                self.update_config(|c| {
+                    c.discovery = on;
+                    Ok(())
+                })
+                .await
+            }
+            W::SetAutostart(on) => self.set_autostart(on),
+            W::SetLanguage(lang) => self.save_setting(|c| c.language = language_of(lang)),
+            W::Unpair => self.unpair().await,
+            // The window opens System Settings itself, on its own thread.
+            W::OpenPermissionSettings(_) => {}
+            W::DismissNotice(id) => {
+                if self.state.notice.as_ref().is_some_and(|n| n.id == id) {
+                    self.state.notice = None;
+                    self.publish();
+                }
+            }
+            W::Quit => self.quit = true,
+        }
     }
 
     fn pair_info(&self) -> PairInfo {
@@ -517,12 +742,10 @@ impl Controller {
         let (address, code) = match parse_pair_entry(&text) {
             Ok(parsed) => parsed,
             Err(e) => {
-                return self.notify(
-                    "Invalid pairing input",
-                    format!(
-                        "Enter a 6-digit code, or HOST[:PORT] followed by the code shown in the \
-                         pairing notice. {e:#}"
-                    ),
+                let tr = self.tr();
+                return self.notify_error(
+                    tr.invalid_pairing_input(),
+                    tr.invalid_pairing_message(&format!("{e:#}")),
                 );
             }
         };
@@ -566,11 +789,8 @@ impl Controller {
                     Ok(RunExit::EmergencyStop) => {
                         self.paused = true;
                         self.state.phase = Phase::EmergencyPaused;
-                        self.notify(
-                            "Sharing paused",
-                            "The emergency chord stopped sharing. Choose \"Resume sharing\" in \
-                             the macwin menu to continue.",
-                        );
+                        let tr = self.tr();
+                        self.notify(tr.paused_title(), tr.paused_by_chord(self.env.window));
                     }
                     Err(e) => self.fail(e),
                 }
@@ -583,26 +803,17 @@ impl Controller {
             } if pairing == Some(tag) => {
                 let (shown, digits) = (code.to_string(), code.digits().to_string());
                 self.state.phase = Phase::PairingWait { code: Some(code) };
-                let title = if replacement {
-                    format!("New pairing code {shown}")
+                let tr = self.tr();
+                if self.env.window {
+                    // The window shows the code; the notice adds the address.
+                    let (title, message) = tr.address_notice(&address, replacement);
+                    self.notify(title, message);
                 } else {
-                    format!("Pairing code {shown}")
-                };
-                let prefix = if replacement {
-                    "The previous code is no longer valid; use this replacement code.\n"
-                } else {
-                    ""
-                };
-                self.notify(
-                    title,
-                    format!(
-                        "{prefix}On the other computer, choose Enter pairing code… in the macwin \
-                         menu and type {digits}, or run:\n  macwin pair --code {digits}\n\
-                         If LAN discovery fails, enter {address} {digits} in that menu or run:\n  \
-                         macwin pair {address} --code {digits}\n\
-                         The code works once, for 10 minutes."
-                    ),
-                );
+                    self.notify(
+                        tr.pairing_code_title(&shown, replacement),
+                        tr.pairing_code_message(&digits, &address, replacement),
+                    );
+                }
             }
             Internal::PairDone { tag, result } if pairing == Some(tag) => {
                 self.pairing = None;
@@ -621,7 +832,12 @@ impl Controller {
         let phase = match event {
             RunEvent::Listening(_) => Phase::Listening,
             RunEvent::Dialing(_) => Phase::Connecting,
-            RunEvent::Connected { .. } => Phase::Connected(RoleKind::Idle),
+            RunEvent::Connected {
+                screens, placement, ..
+            } => {
+                self.peer_connected(&screens, placement);
+                Phase::Connected(RoleKind::Idle)
+            }
             RunEvent::Role(role) => Phase::Connected(role),
             RunEvent::Ended(_) if dialing => Phase::Connecting,
             RunEvent::Ended(_) => Phase::Listening,
@@ -636,31 +852,60 @@ impl Controller {
         self.set_phase(phase);
     }
 
+    /// Remembers what the peer's Hello says about its screens and, for a
+    /// secondary, where its primary put this computer.
+    fn peer_connected(&mut self, screens: &[ScreenInfo], placement: Option<Placement>) {
+        self.state.peer_screens = describe_screens(screens, |_| false);
+        if self.state.role == Some(Role::Secondary) {
+            self.state.placement = placement;
+        }
+    }
+
     fn paired(&mut self, result: Result<(PairedPeer, Option<String>), String>) {
+        let tr = self.tr();
         match result {
             Ok((peer, address)) => {
                 let (side, _) = agree_side(None, peer.peer_side);
                 match store_pairing(&self.env.config_dir, &peer, side, address) {
                     Ok(_) => {
                         self.paused = false;
-                        let message = match side {
-                            Some(s) => format!(
-                                "Its screens are on the {} of this computer. macwin now shares \
-                                 the keyboard, mouse and clipboard with it.",
-                                side_name(s)
-                            ),
-                            None => "Choose where its screens are: \"Other computer is on the \
-                                     left\" or \"… on the right\" in the macwin menu."
-                                .into(),
+                        self.state.peer_screens.clear();
+                        let next = match Config::load(&self.env.config_dir) {
+                            Ok(c) if c.role.is_some() && c.session_placement().is_ok() => {
+                                Next::Shares
+                            }
+                            _ => match side {
+                                Some(s) => Next::OnSide(s),
+                                None => Next::NeedsPlacement,
+                            },
                         };
-                        self.notify(format!("Paired with \"{}\"", peer.device_name), message);
+                        self.notify(
+                            tr.paired(&peer.device_name),
+                            tr.paired_message(next, self.env.window),
+                        );
                     }
-                    Err(e) => self.notify("Pairing failed", format!("cannot save it: {e:#}")),
+                    Err(e) => {
+                        self.notify_error(tr.pairing_failed(), tr.cannot_save(&format!("{e:#}")))
+                    }
                 }
             }
-            Err(e) => self.notify("Pairing failed", e),
+            Err(e) => self.notify_error(tr.pairing_failed(), e),
         }
         self.start_sharing();
+    }
+}
+
+fn role_of(role: macwin_ui::Role) -> Role {
+    match role {
+        macwin_ui::Role::Primary => Role::Primary,
+        macwin_ui::Role::Secondary => Role::Secondary,
+    }
+}
+
+fn language_of(lang: macwin_ui::Lang) -> Language {
+    match lang {
+        macwin_ui::Lang::Ru => Language::Ru,
+        macwin_ui::Lang::En => Language::En,
     }
 }
 
