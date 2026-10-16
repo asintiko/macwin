@@ -451,6 +451,10 @@ fn run_tray_app(background: bool) -> anyhow::Result<()> {
         version = env!("CARGO_PKG_VERSION"),
         background, "app starting"
     );
+    if !background {
+        // Not at login: the prompts need the user's attention.
+        platform::request_permissions();
+    }
     let make_backends: MakeBackends = Arc::new(platform::backends);
     let discovery_targets: DiscoveryTargets = Arc::new(discovery_targets);
     let name = device_name();

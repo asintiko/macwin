@@ -8,7 +8,7 @@ use tracing::debug;
 
 pub use imp::{
     alert, capture, clipboard, display_names, init, injector, open_permission_settings,
-    permissions_report, run_tray, run_window, screens, show_running_instance,
+    permissions_report, request_permissions, run_tray, run_window, screens, show_running_instance,
 };
 
 use crate::driver::Backends;
@@ -146,6 +146,16 @@ mod imp {
     /// Main thread only (the window's state is read there).
     pub fn display_names() -> HashMap<u32, String> {
         app::display_names()
+    }
+
+    /// Shows the system prompts for Accessibility and Input Monitoring while
+    /// either is missing; only then does System Settings list MacWin. macOS
+    /// shows each prompt once per app signature.
+    pub fn request_permissions() {
+        let p = permissions::check();
+        if !(p.sufficient() && p.listen_events) {
+            let _ = permissions::request();
+        }
     }
 
     pub fn open_permission_settings(p: Permission) {
@@ -302,6 +312,8 @@ mod imp {
         HashMap::new()
     }
 
+    pub fn request_permissions() {}
+
     pub fn open_permission_settings(_p: Permission) {}
 
     /// Per-monitor-v2 DPI awareness; must run before any backend is used.
@@ -400,6 +412,8 @@ mod imp {
     pub fn display_names() -> std::collections::HashMap<u32, String> {
         std::collections::HashMap::new()
     }
+
+    pub fn request_permissions() {}
 
     pub fn open_permission_settings(_p: macwin_ui::Permission) {}
 
