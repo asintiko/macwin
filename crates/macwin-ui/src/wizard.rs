@@ -526,7 +526,7 @@ fn status_line(ui: &mut Ui, cx: &mut Cx<'_>, l: &mut Local, dialing: bool) {
                     .size()
                     .x;
             ui.add_space(((ui.available_width() - w) / 2.0).max(0.0));
-            ui.add(egui::Spinner::new().size(18.0).color(pal.accent));
+            widgets::spinner(ui, &pal, 20.0);
             ui.label(RichText::new(text).size(15.0).color(pal.muted));
         });
     }
@@ -579,10 +579,7 @@ fn show_code_page(ui: &mut Ui, cx: &mut Cx<'_>, l: &mut Local) {
                     if waiting {
                         let spinner_rect =
                             egui::Rect::from_center_size(c - vec2(0.0, 12.0), vec2(34.0, 34.0));
-                        egui::Spinner::new()
-                            .size(34.0)
-                            .color(pal.accent)
-                            .paint_at(ui, spinner_rect);
+                        widgets::paint_spinner(ui, &pal, spinner_rect);
                         painter.text(
                             c + vec2(0.0, 30.0),
                             egui::Align2::CENTER_CENTER,
@@ -625,7 +622,7 @@ fn show_code_page(ui: &mut Ui, cx: &mut Cx<'_>, l: &mut Local) {
                             .size()
                             .x;
                     ui.add_space(((ui.available_width() - w) / 2.0).max(0.0));
-                    ui.add(egui::Spinner::new().size(18.0).color(pal.accent));
+                    widgets::spinner(ui, &pal, 20.0);
                     ui.label(RichText::new(text).size(15.0).color(pal.muted));
                 });
             }
