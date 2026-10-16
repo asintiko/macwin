@@ -665,3 +665,37 @@ async fn roles_pair_from_the_window_and_the_secondary_follows_the_arrangement() 
     mac.quit().await;
     pc.quit().await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_role_drops_the_placement_of_the_old_one() {
+    use macwin_ui::{Role as UiRole, UiCommand};
+
+    let mac = start_tray_with(Os::MacOs, "mac", vec![], true);
+    mac.wait("not paired", |s| s.phase == Phase::NotPaired)
+        .await;
+    let placement = Placement {
+        display: Some(1),
+        edge: Edge::Top,
+        offset: Some(0),
+    };
+    mac.shared.send_window(UiCommand::SetRole(UiRole::Primary));
+    mac.shared.send_window(UiCommand::SetPlacement(placement));
+    mac.wait("placed", |s| s.placement == Some(placement)).await;
+
+    // A secondary shows only what its primary announces.
+    mac.shared
+        .send_window(UiCommand::SetRole(UiRole::Secondary));
+    let s = mac
+        .wait("secondary", |s| s.role == Some(Role::Secondary))
+        .await;
+    assert_eq!(s.placement, None);
+    assert_eq!(mac.config().arrangement, Some(placement), "kept on disk");
+
+    // Back to primary: its own arrangement again.
+    mac.shared.send_window(UiCommand::SetRole(UiRole::Primary));
+    mac.wait("primary, placed", |s| {
+        s.role == Some(Role::Primary) && s.placement == Some(placement)
+    })
+    .await;
+    mac.quit().await;
+}

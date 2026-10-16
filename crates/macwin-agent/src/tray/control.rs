@@ -598,7 +598,9 @@ impl Controller {
             self.cancel_pairing();
             self.state.notice = None;
         }
-        if role != Role::Secondary {
+        if self.state.role != Some(role) {
+            // A primary shows its own arrangement, a secondary the one its
+            // primary announces: the old role's means nothing to the new one.
             self.state.placement = None;
         }
         self.update_config(|c| {
