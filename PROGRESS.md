@@ -28,8 +28,9 @@ MacBook и Windows-ноутбуке (её можно провести тольк
 | [`v0.2.0-test.1`](https://github.com/djjdjdkdjdvdvd/macwin/releases/tag/v0.2.0-test.1) | первый выпуск 0.2: окно, роли, расстановка, установщики |
 | [`v0.2.0-test.2`](https://github.com/djjdjdkdjdvdvd/macwin/releases/tag/v0.2.0-test.2) | установщик macOS: «Выйти» → SIGINT → принудительно; Apple Silicon и под Rosetta; `~/Applications` для обычной учётной записи |
 | [`v0.2.0-test.3`](https://github.com/djjdjdkdjdvdvd/macwin/releases/tag/v0.2.0-test.3) | macOS сам спрашивает разрешения при запуске; `macwin run` учитывает роли |
+| [`v0.2.0-test.4`](https://github.com/djjdjdkdjdvdvd/macwin/releases/tag/v0.2.0-test.4) | лицензии шрифтов окна в `THIRD_PARTY_NOTICES`; запись автозапуска от 0.1 обновляется сама; смена роли сбрасывает расстановку прежней роли |
 
-Каждый из этих выпусков скачан без авторизации: SHA-256 всех шести файлов
+Выпуски `test.1`–`test.3` скачаны без авторизации: SHA-256 всех шести файлов
 совпали, EXE — 64-битная GUI-программа для Windows, в ZIP все файлы установщика,
 подпись приложения в DMG проверена в CI.
 
@@ -123,7 +124,10 @@ MacWin», пауза, выход. На macOS значок в Dock виден, п
 - Скрипты: `bash -n` и ShellCheck без замечаний; PowerShell-скрипты разбираются в CI.
   Логика `install-macos.sh` прогнана на Linux с заглушками команд macOS: установка
   через `curl | bash`, обновление поверх запущенного MacWin со сменой подписи
-  (сброс разрешений), установка из DMG.
+  (сброс разрешений), установка из DMG. `install-windows.ps1` запущен в PowerShell
+  7.6 на Linux против настоящего выпуска (вместо `powershell.exe` — заглушка):
+  скачивание, сверка SHA-256, распаковка и запуск `install.ps1` работают, а
+  подменённый ZIP отклоняется до запуска установщика.
 
 ## Ограничения
 
