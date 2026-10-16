@@ -38,17 +38,21 @@ MacBook — **основной** компьютер. К нему подключ�
 
 | # | Этап | Issue | Статус |
 |---|------|-------|--------|
-| 1 | Расстановка экранов: ядро и протокол | [#1](https://github.com/asintiko/macwin/issues/1) | ⬜ |
-| 2 | Роли «основной / вторичный» и сопряжение по коду | [#2](https://github.com/asintiko/macwin/issues/2) | ⬜ |
-| 3 | Окно приложения и мастер первого запуска | [#3](https://github.com/asintiko/macwin/issues/3) | ⬜ |
-| 4 | Редактор расстановки экранов | [#4](https://github.com/asintiko/macwin/issues/4) | ⬜ |
-| 5 | Главное окно: состояние и настройки | [#5](https://github.com/asintiko/macwin/issues/5) | ⬜ |
-| 6 | Интеграция с macOS и Windows: трей, Dock, автозапуск | [#6](https://github.com/asintiko/macwin/issues/6) | ⬜ |
-| 7 | Сборка, CI и документация | [#7](https://github.com/asintiko/macwin/issues/7) | ⬜ |
+| 1 | Расстановка экранов: ядро и протокол | [#1](https://github.com/asintiko/macwin/issues/1) | ✅ |
+| 2 | Роли «основной / вторичный» и сопряжение по коду | [#2](https://github.com/asintiko/macwin/issues/2) | ✅ |
+| 3 | Окно приложения и мастер первого запуска | [#3](https://github.com/asintiko/macwin/issues/3) | ✅ 🧪 |
+| 4 | Редактор расстановки экранов | [#4](https://github.com/asintiko/macwin/issues/4) | ✅ 🧪 |
+| 5 | Главное окно: состояние и настройки | [#5](https://github.com/asintiko/macwin/issues/5) | ✅ 🧪 |
+| 6 | Интеграция с macOS и Windows: трей, Dock, автозапуск | [#6](https://github.com/asintiko/macwin/issues/6) | ✅ 🧪 |
+| 7 | Сборка, CI и документация | [#7](https://github.com/asintiko/macwin/issues/7) | ✅ |
 | 8 | Проверка на реальных компьютерах | [#8](https://github.com/asintiko/macwin/issues/8) | 🧪 |
 | — | Бэклог после 0.2 | [#9](https://github.com/asintiko/macwin/issues/9) | ⬜ |
 
 Подробные задачи и критерии готовности — в issue каждого этапа.
+
+Этапы 1–7 реализованы и проходят CI на Linux, macOS и Windows (16 октября 2026);
+🧪 — поведение окна, трея и Dock на экране проверяется только на этапе 8. Что
+именно сделано и как проверено — в [PROGRESS.md](PROGRESS.md).
 
 ## Риски
 
