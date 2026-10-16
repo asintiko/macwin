@@ -455,6 +455,14 @@ fn run_tray_app(background: bool) -> anyhow::Result<()> {
         // Not at login: the prompts need the user's attention.
         platform::request_permissions();
     }
+    let autostart = autostart::for_this_machine().ok();
+    if let Some(a) = &autostart {
+        match a.migrate() {
+            Ok(true) => info!("the login item of an older version now starts without the window"),
+            Ok(false) => {}
+            Err(e) => warn!(error = %format!("{e:#}"), "cannot update the login item"),
+        }
+    }
     let make_backends: MakeBackends = Arc::new(platform::backends);
     let discovery_targets: DiscoveryTargets = Arc::new(discovery_targets);
     let name = device_name();
@@ -465,7 +473,7 @@ fn run_tray_app(background: bool) -> anyhow::Result<()> {
         device_name: name.clone(),
         staging: staging_dir()?,
         make_backends,
-        autostart: autostart::for_this_machine().ok(),
+        autostart,
         discovery_targets,
         discovery_wait: DISCOVERY_WAIT,
         retry_min: runner::RETRY_MIN,

@@ -128,11 +128,35 @@ pub enum AutostartState {
 pub struct Autostart {
     store: Box<dyn AutostartStore>,
     entry: String,
+    /// Entries older versions of this copy wrote.
+    legacy: Vec<String>,
 }
 
 impl Autostart {
     pub fn new(store: Box<dyn AutostartStore>, entry: String) -> Autostart {
-        Autostart { store, entry }
+        Autostart {
+            store,
+            entry,
+            legacy: Vec::new(),
+        }
+    }
+
+    /// Entries an older version of this copy wrote, for [`Autostart::migrate`].
+    pub fn with_legacy(mut self, legacy: Vec<String>) -> Autostart {
+        self.legacy = legacy;
+        self
+    }
+
+    /// Rewrites an entry an older version of this copy left (0.1 opened the
+    /// window at login); entries of other copies stay. True when rewritten.
+    pub fn migrate(&self) -> anyhow::Result<bool> {
+        match self.store.read()? {
+            Some(e) if self.legacy.contains(&e) => {
+                self.store.write(&self.entry)?;
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
     }
 
     pub fn state(&self) -> anyhow::Result<AutostartState> {
@@ -167,6 +191,19 @@ fn xml_escape(s: &str) -> String {
 /// sessions: the menu bar item without the window. No KeepAlive: quitting
 /// must stick.
 pub fn launch_agent_plist(exe: &Path) -> String {
+    launch_agent_running(exe, &["tray", "--background"])
+}
+
+/// The LaunchAgent macwin 0.1 wrote, byte for byte: `exe tray`.
+pub fn legacy_launch_agent_plist(exe: &Path) -> String {
+    launch_agent_running(exe, &["tray"])
+}
+
+fn launch_agent_running(exe: &Path, args: &[&str]) -> String {
+    let mut arguments = String::new();
+    for a in std::iter::once(exe.display().to_string()).chain(args.iter().map(|a| a.to_string())) {
+        arguments.push_str(&format!("\t\t<string>{}</string>\n", xml_escape(&a)));
+    }
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -176,10 +213,7 @@ pub fn launch_agent_plist(exe: &Path) -> String {
 	<string>{LAUNCH_AGENT_LABEL}</string>
 	<key>ProgramArguments</key>
 	<array>
-		<string>{}</string>
-		<string>tray</string>
-		<string>--background</string>
-	</array>
+{arguments}	</array>
 	<key>RunAtLoad</key>
 	<true/>
 	<key>LimitLoadToSessionType</key>
@@ -188,15 +222,19 @@ pub fn launch_agent_plist(exe: &Path) -> String {
 	<string>Interactive</string>
 </dict>
 </plist>
-"#,
-        xml_escape(&exe.display().to_string())
+"#
     )
 }
 
 /// The `Run` value that starts `tray_exe` without its window (quoted:
 /// paths contain spaces).
 pub fn run_command(tray_exe: &Path) -> String {
-    format!("\"{}\" --background", tray_exe.display())
+    format!("{} --background", legacy_run_command(tray_exe))
+}
+
+/// The `Run` value macwin 0.1 wrote: `tray_exe` with no arguments.
+pub fn legacy_run_command(tray_exe: &Path) -> String {
+    format!("\"{}\"", tray_exe.display())
 }
 
 /// The app bundle `exe` lives in (`…/MacWin.app/Contents/MacOS/macwin`).
@@ -222,7 +260,8 @@ fn for_executable(exe: &Path) -> anyhow::Result<Autostart> {
     Ok(Autostart::new(
         Box::new(LaunchAgentFile::in_home(Path::new(&home))),
         launch_agent_plist(exe),
-    ))
+    )
+    .with_legacy(vec![legacy_launch_agent_plist(exe)]))
 }
 
 #[cfg(windows)]
@@ -245,7 +284,8 @@ fn for_executable(exe: &Path) -> anyhow::Result<Autostart> {
             name: RUN_VALUE.into(),
         }),
         run_command(&target),
-    ))
+    )
+    .with_legacy(vec![legacy_run_command(&target)]))
 }
 
 #[cfg(not(any(target_os = "macos", windows)))]
@@ -315,11 +355,61 @@ mod tests {
         assert!(!plist.contains("KeepAlive"), "quitting must stick");
     }
 
+    /// What `launch_agent_plist` of macwin 0.1 wrote for `/x/macwin`.
+    const PLIST_0_1: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>io.macwin.MacWin</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/x/macwin</string>
+		<string>tray</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>LimitLoadToSessionType</key>
+	<string>Aqua</string>
+	<key>ProcessType</key>
+	<string>Interactive</string>
+</dict>
+</plist>
+"#;
+
+    #[test]
+    fn a_login_item_of_version_0_1_opens_no_window_after_migrating() {
+        let home = tempfile::tempdir().unwrap();
+        let store = || Box::new(LaunchAgentFile::in_home(home.path()));
+        let exe = Path::new("/x/macwin");
+        assert_eq!(legacy_launch_agent_plist(exe), PLIST_0_1);
+        let a = Autostart::new(store(), launch_agent_plist(exe))
+            .with_legacy(vec![legacy_launch_agent_plist(exe)]);
+        assert!(!a.migrate().unwrap(), "nothing to migrate");
+        assert_eq!(a.state().unwrap(), AutostartState::Off);
+        store().write(PLIST_0_1).unwrap();
+        assert_eq!(a.state().unwrap(), AutostartState::Other);
+        assert!(a.migrate().unwrap());
+        assert_eq!(a.state().unwrap(), AutostartState::On);
+        assert!(!a.migrate().unwrap(), "only once");
+        // The entry of another copy stays.
+        store()
+            .write(&legacy_launch_agent_plist(Path::new("/y/macwin")))
+            .unwrap();
+        assert!(!a.migrate().unwrap());
+        assert_eq!(a.state().unwrap(), AutostartState::Other);
+    }
+
     #[test]
     fn run_commands_are_quoted() {
         assert_eq!(
             run_command(Path::new(r"C:\Users\A B\macwin-tray.exe")),
             r#""C:\Users\A B\macwin-tray.exe" --background"#
+        );
+        assert_eq!(
+            legacy_run_command(Path::new(r"C:\Users\A B\macwin-tray.exe")),
+            r#""C:\Users\A B\macwin-tray.exe""#,
+            "as macwin 0.1 wrote it"
         );
     }
 
