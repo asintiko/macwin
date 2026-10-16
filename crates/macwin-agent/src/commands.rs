@@ -21,7 +21,9 @@ use tracing::{error, info, warn};
 
 use crate::autostart::{self, AutostartState};
 use crate::cli::{AutostartArg, PairArgs, SpikeCaptureArgs, SpikeKvmArgs, SpikeNetArgs};
-use crate::config::{Config, normalize_address, os_name, remember_peer_address, side_name};
+use crate::config::{
+    Config, edge_name, normalize_address, os_name, remember_peer_address, side_name,
+};
 use crate::driver::{
     ClipboardSettings, Connected, SessionConfig, SessionEnd, kvm_hello, spawn_session,
 };
@@ -321,17 +323,15 @@ pub async fn run() -> anyhow::Result<()> {
     let peer = config.peer.clone().context(
         "not paired yet: run `macwin pair` on one machine and the command it prints on the other",
     )?;
-    let side = peer
-        .side
-        .context("tell macwin where the peer's screens are: macwin config set side left|right")?;
+    // A secondary follows the placement its primary announces.
+    let placement = config.session_placement().map_err(|_| {
+        anyhow!(
+            "tell macwin where the peer's screens are: arrange them in the MacWin window, or run \
+             macwin config set side left|right"
+        )
+    })?;
     let staging = staging_dir()?;
-    let session = session_config(
-        &config,
-        os,
-        device_name(),
-        Some(Placement::side(side)),
-        staging,
-    );
+    let session = session_config(&config, os, device_name(), placement, staging);
     let with_clipboard = session.clipboard.is_some();
     let sharing = match &session.clipboard {
         None => "off".to_string(),
@@ -351,11 +351,19 @@ pub async fn run() -> anyhow::Result<()> {
         None => Mode::Listen(config.listen),
     };
     let discovery = run_discovery(&config);
+    let whose = match placement {
+        Some(p) => format!(
+            "whose screens are on the {} of {}",
+            edge_name(p.edge),
+            p.display
+                .map_or("this machine".to_string(), |d| format!("display {d}"))
+        ),
+        None => "which places this machine (it is the primary)".to_string(),
+    };
     println!(
-        "sharing with \"{}\" ({}), whose screens are on the {}; clipboard: {sharing}",
+        "sharing with \"{}\" ({}), {whose}; clipboard: {sharing}",
         peer.name,
         os_name(peer.os),
-        side_name(side),
     );
     println!("emergency release: {EMERGENCY_CHORD}. Ctrl+C here stops macwin.");
     let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
