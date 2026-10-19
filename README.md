@@ -22,7 +22,7 @@ need testing on physical hardware.
 </p>
 
 Plan and per-stage status: [PLAN.md](PLAN.md) and issue [#10](https://github.com/asintiko/macwin/issues/10) (Russian).
-Next: [PLAN-0.3.md](PLAN-0.3.md) — latency measurement and speed-ups, Linux (Kali) support, several computers (Russian).
+Next: [PLAN-0.3.md](PLAN-0.3.md) — the cursor fix, latency measurement and speed-ups, several computers, Linux (Kali) support (Russian).
 Current progress, verification results and remaining work: [PROGRESS.md](PROGRESS.md) (Russian).
 First-run instructions and the hardware checklist: [FIRST_RUN.md](FIRST_RUN.md) (Russian).
 Test downloads: [latest release](https://github.com/djjdjdkdjdvdvd/macwin/releases/latest)
