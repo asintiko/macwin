@@ -290,6 +290,9 @@ mod tests {
             |f: u32, v: i64| CGEvent::set_integer_value_field(Some(&e), CGEventField(f), v);
         let set_double =
             |f: u32, v: f64| CGEvent::set_double_value_field(Some(&e), CGEventField(f), v);
+        // CoreGraphics keeps the gesture fields only on a gesture-typed event.
+        CGEvent::set_type(Some(&e), DOCK_CONTROL);
+        set_int(FIELD_CGS_TYPE, i64::from(CGS_DOCK_CONTROL));
         set_int(FIELD_GESTURE_HID_TYPE, 23);
         set_int(FIELD_GESTURE_PHASE, 4);
         set_int(FIELD_SWIPE_MOTION, 1);
