@@ -9,7 +9,7 @@ use super::*;
 use crate::arrange::{Edge, Placement};
 use crate::geometry::tests::screen;
 use crate::msg::{CAP_INPUT_CAPTURE, Hello, Ping};
-use crate::types::{MouseButton, Point, Side};
+use crate::types::{GesturePhase, MouseButton, Point, Side};
 
 const MS: Duration = Duration::from_millis(1);
 const KEY_A: Hid = Hid(0x07_0004);
@@ -1779,4 +1779,160 @@ fn mouse_datagrams_are_counted_with_gaps_per_control_period() {
     }
     let s = m.stats(t0 + 10 * MS).unwrap();
     assert_eq!((s.mouse_out_per_sec, s.mouse_in_per_sec), (5, 0));
+}
+
+fn fn_key(down: bool) -> CapturedEvent {
+    key(Hid::APPLE_FN, down)
+}
+
+fn gesture(g: Gesture) -> CapturedEvent {
+    CapturedEvent::Gesture(g)
+}
+
+fn wheel_notch(dy: i32) -> Action {
+    Action::SendInput(InputMsg::Wheel(WheelMsg {
+        dx: 0,
+        dy,
+        unit: WheelUnit::Notch120,
+    }))
+}
+
+#[test]
+fn a_tap_of_fn_switches_the_pcs_language() {
+    let t0 = Instant::now();
+    let mut e = mac_controlling(t0);
+    assert_eq!(e.on_local_event(t0, fn_key(true)), swallowed(vec![]));
+    assert_eq!(
+        e.on_local_event(t0, fn_key(false)),
+        swallowed(vec![
+            send_key(Hid::LEFT_GUI, true, false),
+            send_key(Hid::SPACE, true, false),
+            send_key(Hid::SPACE, false, false),
+            send_key(Hid::LEFT_GUI, false, false),
+        ])
+    );
+    // Fn held with another key (Fn+Delete, Fn+arrows) is not a tap; the key
+    // itself goes through as usual and Fn never does.
+    assert_eq!(e.on_local_event(t0, fn_key(true)), swallowed(vec![]));
+    assert_eq!(
+        e.on_local_event(t0, key(KEY_A, true)),
+        swallowed(vec![send_key(KEY_A, true, false)])
+    );
+    assert_eq!(
+        e.on_local_event(t0, key(KEY_A, false)),
+        swallowed(vec![send_key(KEY_A, false, false)])
+    );
+    assert_eq!(e.on_local_event(t0, fn_key(false)), swallowed(vec![]));
+    // Same with a click while Fn is held.
+    e.on_local_event(t0, fn_key(true));
+    e.on_local_event(t0, button(MouseButton::Left, true));
+    e.on_local_event(t0, button(MouseButton::Left, false));
+    assert_eq!(e.on_local_event(t0, fn_key(false)), swallowed(vec![]));
+}
+
+#[test]
+fn fn_keeps_a_held_modifier_and_stays_local_when_idle() {
+    let t0 = Instant::now();
+    let mut e = mac_controlling(t0);
+    // Cmd held on the Mac is Ctrl held on the PC.
+    e.on_local_event(t0, key(Hid::LEFT_GUI, true));
+    e.on_local_event(t0, fn_key(true));
+    assert_eq!(
+        e.on_local_event(t0, fn_key(false)),
+        swallowed(vec![
+            send_key(Hid::LEFT_GUI, true, false),
+            send_key(Hid::SPACE, true, false),
+            send_key(Hid::SPACE, false, false),
+            send_key(Hid::LEFT_GUI, false, false),
+        ])
+    );
+    // Idle: Fn is the Mac's own (its input source switch).
+    let mut idle = mac_session(t0, TransportRole::Dialer);
+    assert_eq!(idle.on_local_event(t0, fn_key(true)), delivered());
+    assert_eq!(idle.on_local_event(t0, fn_key(false)), delivered());
+}
+
+#[test]
+fn fn_pressed_before_the_crossing_stays_with_the_mac() {
+    let t0 = Instant::now();
+    let mut e = mac_session(t0, TransportRole::Dialer);
+    assert_eq!(e.on_local_event(t0, fn_key(true)), delivered());
+    e.on_local_event(t0, mv(1439.5, 450.0));
+    assert_eq!(e.role(), RoleKind::Controlling);
+    // The Mac saw the down: it gets the up, and nothing is switched.
+    assert_eq!(e.on_local_event(t0, fn_key(false)), delivered());
+}
+
+#[test]
+fn gestures_are_swallowed_and_sent_as_the_pcs_shortcuts() {
+    let t0 = Instant::now();
+    let mut e = mac_controlling(t0);
+    assert_eq!(
+        e.on_local_event(t0, gesture(Gesture::SwitchSpace { next: true })),
+        swallowed(vec![
+            send_key(Hid::LEFT_CTRL, true, false),
+            send_key(Hid::LEFT_GUI, true, false),
+            send_key(Hid::RIGHT_ARROW, true, false),
+            send_key(Hid::RIGHT_ARROW, false, false),
+            send_key(Hid::LEFT_GUI, false, false),
+            send_key(Hid::LEFT_CTRL, false, false),
+        ])
+    );
+    assert_eq!(
+        e.on_local_event(t0, gesture(Gesture::Overview)),
+        swallowed(vec![
+            send_key(Hid::LEFT_GUI, true, false),
+            send_key(Hid::TAB, true, false),
+            send_key(Hid::TAB, false, false),
+            send_key(Hid::LEFT_GUI, false, false),
+        ])
+    );
+    // Rotation, smart zoom and the like: swallowed, nothing sent.
+    assert_eq!(
+        e.on_local_event(t0, gesture(Gesture::Other)),
+        swallowed(vec![])
+    );
+    // A pinch zooms in whole Ctrl+wheel steps.
+    let pinch = |delta, phase| gesture(Gesture::Magnify { delta, phase });
+    assert_eq!(
+        e.on_local_event(t0, pinch(0.05, GesturePhase::Began)),
+        swallowed(vec![])
+    );
+    assert_eq!(
+        e.on_local_event(t0, pinch(0.2, GesturePhase::Changed)),
+        swallowed(vec![
+            send_key(Hid::LEFT_CTRL, true, false),
+            wheel_notch(120),
+            wheel_notch(120),
+            send_key(Hid::LEFT_CTRL, false, false),
+        ])
+    );
+    assert_eq!(
+        e.on_local_event(t0, pinch(-0.13, GesturePhase::Ended)),
+        swallowed(vec![
+            send_key(Hid::LEFT_CTRL, true, false),
+            wheel_notch(-120),
+            send_key(Hid::LEFT_CTRL, false, false),
+        ])
+    );
+}
+
+#[test]
+fn gestures_stay_local_unless_controlling() {
+    let t0 = Instant::now();
+    let mut idle = mac_session(t0, TransportRole::Dialer);
+    for g in [
+        Gesture::Overview,
+        Gesture::SwitchSpace { next: false },
+        Gesture::Other,
+    ] {
+        assert_eq!(idle.on_local_event(t0, gesture(g)), delivered());
+    }
+    // A controlled Mac keeps its user's gestures, and they do not take over.
+    let mut w = win_controlled(t0);
+    assert_eq!(
+        w.on_local_event(t0, gesture(Gesture::Overview)),
+        delivered()
+    );
+    assert_eq!(w.role(), RoleKind::Controlled);
 }

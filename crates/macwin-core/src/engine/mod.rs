@@ -35,9 +35,10 @@ use crate::msg::{
 };
 use crate::os::pixels_to_notch120;
 use crate::remap::Remap;
+use crate::shortcuts::{ZoomSteps, chord, gesture_keys, language_switch, zoom};
 use crate::types::{
-    CaptureFault, CapturedEvent, GeometryError, GrabCommand, Hid, InjectCommand, ModifierMask, Os,
-    PointF, RoleKind, ScreenInfo, WheelUnit,
+    CaptureFault, CapturedEvent, GeometryError, Gesture, GrabCommand, Hid, InjectCommand,
+    ModifierMask, Os, PointF, RoleKind, ScreenInfo, WheelUnit,
 };
 use session::{Controlled, Controlling, LocalInput, Role, Session};
 
@@ -441,7 +442,9 @@ impl Engine {
                 }
                 ev
             }
-            CapturedEvent::MouseMove { .. } | CapturedEvent::Wheel { .. } => ev,
+            CapturedEvent::MouseMove { .. }
+            | CapturedEvent::Wheel { .. }
+            | CapturedEvent::Gesture(_) => ev,
         }
     }
 
@@ -511,6 +514,8 @@ impl Engine {
             npl_src: crossing.npl_src,
             pre_grab: self.input.keys.difference(&self.input.held_from_remote),
             fwd_buttons: ButtonSet::new(),
+            fn_tap: None,
+            zoom: ZoomSteps::default(),
         });
         info!(epoch, "entered the peer's screen");
         swallow(actions)
@@ -523,8 +528,39 @@ impl Engine {
         let Role::Controlling(c) = &mut s.role else {
             return deliver(Vec::new());
         };
+        // The modifiers the peer holds, in its keys: shortcuts leave them alone.
+        let held = s.remap.map_mask(self.input.keys.modifier_mask());
+        let sends = |msgs: Vec<InputMsg>| msgs.into_iter().map(Action::SendInput).collect();
         match ev {
+            CapturedEvent::Key {
+                hid: Hid::APPLE_FN,
+                down,
+                repeat,
+            } => {
+                if c.pre_grab.contains(Hid::APPLE_FN) {
+                    if down {
+                        return swallow(Vec::new());
+                    }
+                    // The local OS saw the down, so it gets the up.
+                    c.pre_grab.remove(Hid::APPLE_FN);
+                    return deliver(Vec::new());
+                }
+                if down {
+                    if !repeat {
+                        c.fn_tap = Some(true);
+                    }
+                    return swallow(Vec::new());
+                }
+                self.input.held_from_remote.remove(Hid::APPLE_FN);
+                if c.fn_tap.take() == Some(true) {
+                    return swallow(sends(chord(language_switch(s.peer.os), held)));
+                }
+                swallow(Vec::new())
+            }
             CapturedEvent::Key { hid, down, repeat } => {
+                if down && c.fn_tap.is_some() {
+                    c.fn_tap = Some(false);
+                }
                 if c.pre_grab.contains(hid) {
                     if down {
                         // Repeat of a key the local OS already has: not forwarded.
@@ -551,6 +587,9 @@ impl Engine {
             CapturedEvent::Button { button, down, .. } => {
                 if down {
                     c.fwd_buttons.insert(button);
+                    if c.fn_tap.is_some() {
+                        c.fn_tap = Some(false);
+                    }
                 } else {
                     c.fwd_buttons.remove(button);
                     self.input.buttons_from_remote.remove(button);
@@ -572,6 +611,20 @@ impl Engine {
                     WheelMsg { dx, dy, unit }
                 };
                 swallow(vec![Action::SendInput(InputMsg::Wheel(w))])
+            }
+            // Gestures never reach the local OS while it controls the peer;
+            // the ones the peer has an equivalent for are sent as shortcuts.
+            CapturedEvent::Gesture(g) => {
+                let msgs = match g {
+                    Gesture::Magnify { delta, phase } => {
+                        zoom(s.peer.os, c.zoom.on_magnify(delta, phase), held)
+                    }
+                    Gesture::SwitchSpace { .. } | Gesture::Overview => {
+                        gesture_keys(s.peer.os, g).map_or_else(Vec::new, |k| chord(k, held))
+                    }
+                    Gesture::Other => Vec::new(),
+                };
+                swallow(sends(msgs))
             }
             CapturedEvent::MouseMove { delta, .. } => {
                 match s
@@ -622,6 +675,8 @@ impl Engine {
             CapturedEvent::Key { down, repeat, .. } => down && !repeat,
             CapturedEvent::Button { down, .. } => down,
             CapturedEvent::Wheel { .. } => true,
+            // The local user's own gestures act locally and do not take over.
+            CapturedEvent::Gesture(_) => false,
             CapturedEvent::MouseMove { delta, .. } => {
                 if c.last_phys_move
                     .is_some_and(|t| now.saturating_duration_since(t) > window)

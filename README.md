@@ -196,7 +196,11 @@ Open the tray app on both machines (or run `macwin.exe run` on the PC and
 
 Push the cursor over the shared edge to control the other machine; touch the
 other machine's own mouse or keyboard to take control back. Trackpad and
-Magic Mouse scrolling stays smooth on the PC. Sharing reconnects by itself
+Magic Mouse scrolling stays smooth on the PC. While the Mac controls the PC,
+trackpad gestures act on the PC instead of the Mac: a pinch zooms (Ctrl+wheel),
+a three/four-finger swipe left or right switches virtual desktops
+(Ctrl+Win+arrow) and a swipe up or down opens Task View (Win+Tab). A tap of Fn
+(🌐) switches the PC's input language (Win+Space). Sharing reconnects by itself
 when the network drops or the other machine restarts. The emergency chord
 **Ctrl+Alt+Shift+Esc** (Control+Option+Shift+Esc on a Mac) always returns
 local control: it pauses the tray (**Resume sharing** continues) and stops

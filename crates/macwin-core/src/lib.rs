@@ -19,12 +19,14 @@ pub mod msg;
 pub mod os;
 pub mod remap;
 pub mod safety;
+pub mod shortcuts;
 pub mod types;
 
 pub use engine::{
     Action, CloseReason, Engine, EngineConfig, LocalOutcome, PeerInfo, Timings, TransportRole,
 };
 pub use types::{
-    CaptureFault, CapturedEvent, GeometryError, GrabCommand, Hid, InjectCommand, ModifierMask,
-    MouseButton, Os, Point, PointF, Rect, RoleKind, ScreenInfo, Side, WheelUnit,
+    CaptureFault, CapturedEvent, GeometryError, Gesture, GesturePhase, GrabCommand, Hid,
+    InjectCommand, ModifierMask, MouseButton, Os, Point, PointF, Rect, RoleKind, ScreenInfo, Side,
+    WheelUnit,
 };

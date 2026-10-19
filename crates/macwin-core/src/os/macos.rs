@@ -3,7 +3,7 @@
 use std::time::{Duration, Instant};
 
 use super::PIXELS_PER_NOTCH;
-use crate::types::{Hid, ModifierMask, MouseButton, PointF};
+use crate::types::{Gesture, GesturePhase, Hid, ModifierMask, MouseButton, PointF};
 
 // Device-dependent modifier bits (NX_DEVICE*KEYMASK), one per physical key.
 pub const LCTRL: u64 = 0x0000_0001;
@@ -26,6 +26,15 @@ pub const COMMAND: u64 = 0x0010_0000;
 pub const KVK_CAPS_LOCK: u16 = 0x39;
 /// macOS virtual key code of Fn.
 pub const KVK_FUNCTION: u16 = 0x3F;
+/// `kCGEventFlagMaskSecondaryFn`.
+pub const SECONDARY_FN: u64 = 0x0080_0000;
+
+/// Whether Fn / 🌐 is down after a flags-changed event of [`KVK_FUNCTION`].
+/// (Other keys, arrows and F-keys among them, carry this flag too, which is
+/// why only Fn's own flags-changed event may be read this way.)
+pub fn fn_key_down(flags: u64) -> bool {
+    flags & SECONDARY_FN != 0
+}
 
 /// (key code, device-dependent bit, HID) of the eight modifier keys.
 const MODIFIER_KEYS: [(u16, u64, Hid); 8] = [
@@ -184,6 +193,145 @@ impl WheelAccumulator {
     }
 }
 
+// ---- trackpad gestures ---------------------------------------------------
+//
+// Gesture events are private CGS event types. The field numbers and values
+// are the ones Mac Mouse Fix, iss and InstantSpaceSwitcher rely on.
+
+/// CGS event type of trackpad gestures: pinch, rotation, smart zoom and the
+/// events that accompany scrolls and Dock swipes.
+pub const CGS_GESTURE: u32 = 29;
+/// CGS event type of Dock swipes: Spaces, Mission Control, App Exposé,
+/// Launchpad. Dropping them in an event tap keeps the Dock from seeing them.
+pub const CGS_DOCK_CONTROL: u32 = 30;
+/// CGEventField numbers.
+pub const FIELD_CGS_TYPE: u32 = 55;
+pub const FIELD_GESTURE_HID_TYPE: u32 = 110;
+pub const FIELD_MAGNIFICATION: u32 = 113;
+pub const FIELD_SWIPE_MOTION: u32 = 123;
+pub const FIELD_SWIPE_PROGRESS: u32 = 124;
+pub const FIELD_SWIPE_VELOCITY_X: u32 = 129;
+pub const FIELD_SWIPE_VELOCITY_Y: u32 = 130;
+pub const FIELD_GESTURE_PHASE: u32 = 132;
+
+/// IOHIDEventType values in [`FIELD_GESTURE_HID_TYPE`].
+const HID_ZOOM: i64 = 8;
+const HID_DOCK_SWIPE: i64 = 23;
+/// IOHIDGestureMotion values in [`FIELD_SWIPE_MOTION`].
+const MOTION_HORIZONTAL: i64 = 1;
+const MOTION_VERTICAL: i64 = 2;
+/// Gesture phases in [`FIELD_GESTURE_PHASE`].
+const PHASE_BEGAN: i64 = 1;
+const PHASE_CHANGED: i64 = 2;
+const PHASE_ENDED: i64 = 4;
+const PHASE_CANCELLED: i64 = 8;
+
+/// The fields of one gesture event that matter.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct RawGesture {
+    /// [`CGS_GESTURE`] or [`CGS_DOCK_CONTROL`].
+    pub cgs_type: u32,
+    pub hid_type: i64,
+    pub phase: i64,
+    pub motion: i64,
+    pub progress: f64,
+    pub velocity_x: f64,
+    pub velocity_y: f64,
+    pub magnification: f64,
+}
+
+fn gesture_phase(phase: i64) -> GesturePhase {
+    match phase {
+        PHASE_BEGAN => GesturePhase::Began,
+        PHASE_CHANGED => GesturePhase::Changed,
+        PHASE_ENDED | PHASE_CANCELLED => GesturePhase::Ended,
+        _ => GesturePhase::Other,
+    }
+}
+
+fn nonzero(v: f64) -> bool {
+    v.is_finite() && v != 0.0
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Swipe {
+    motion: i64,
+    progress: f64,
+    velocity: f64,
+}
+
+/// Recognises gestures in the event stream. A Dock swipe is reported once,
+/// when it ends; a horizontal one goes to the next Space when its progress
+/// (or, without one, its velocity) is positive.
+#[derive(Debug, Clone, Default)]
+pub struct GestureTracker {
+    swipe: Option<Swipe>,
+}
+
+impl GestureTracker {
+    pub fn on_event(&mut self, g: &RawGesture) -> Gesture {
+        if g.cgs_type == CGS_DOCK_CONTROL && g.hid_type == HID_DOCK_SWIPE {
+            return self.dock_swipe(g);
+        }
+        if g.cgs_type == CGS_GESTURE && g.hid_type == HID_ZOOM {
+            return Gesture::Magnify {
+                delta: if g.magnification.is_finite() {
+                    g.magnification
+                } else {
+                    0.0
+                },
+                phase: gesture_phase(g.phase),
+            };
+        }
+        Gesture::Other
+    }
+
+    fn dock_swipe(&mut self, g: &RawGesture) -> Gesture {
+        let velocity = if g.motion == MOTION_VERTICAL {
+            g.velocity_y
+        } else {
+            g.velocity_x
+        };
+        let fresh = Swipe {
+            motion: g.motion,
+            progress: 0.0,
+            velocity: 0.0,
+        };
+        match g.phase {
+            PHASE_BEGAN => {
+                self.swipe = Some(fresh);
+                Gesture::Other
+            }
+            PHASE_CHANGED => {
+                let s = self.swipe.get_or_insert(fresh);
+                if nonzero(g.progress) {
+                    s.progress = g.progress;
+                }
+                if nonzero(velocity) {
+                    s.velocity = velocity;
+                }
+                Gesture::Other
+            }
+            PHASE_ENDED => {
+                let s = self.swipe.take().unwrap_or(fresh);
+                let value = [s.progress, g.progress, velocity, s.velocity]
+                    .into_iter()
+                    .find(|&v| nonzero(v));
+                match (s.motion, value) {
+                    (MOTION_HORIZONTAL, Some(v)) => Gesture::SwitchSpace { next: v > 0.0 },
+                    (MOTION_VERTICAL, Some(_)) => Gesture::Overview,
+                    _ => Gesture::Other,
+                }
+            }
+            PHASE_CANCELLED => {
+                self.swipe = None;
+                Gesture::Other
+            }
+            _ => Gesture::Other,
+        }
+    }
+}
+
 /// Counts clicks for `kCGMouseEventClickState`: the same button pressed
 /// again within the double-click interval and within 4 points of the
 /// previous press continues the sequence.
@@ -226,6 +374,129 @@ impl ClickCounter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fn_is_down_while_its_flag_is_set() {
+        assert!(fn_key_down(SECONDARY_FN));
+        assert!(fn_key_down(SECONDARY_FN | COMMAND | LCMD));
+        assert!(!fn_key_down(COMMAND | LCMD));
+        assert_eq!(flags_changed(KVK_FUNCTION, SECONDARY_FN), None);
+    }
+
+    fn dock(phase: i64, motion: i64, progress: f64, velocity: f64) -> RawGesture {
+        RawGesture {
+            cgs_type: CGS_DOCK_CONTROL,
+            hid_type: HID_DOCK_SWIPE,
+            phase,
+            motion,
+            progress,
+            velocity_x: if motion == MOTION_HORIZONTAL {
+                velocity
+            } else {
+                0.0
+            },
+            velocity_y: if motion == MOTION_VERTICAL {
+                velocity
+            } else {
+                0.0
+            },
+            magnification: 0.0,
+        }
+    }
+
+    #[test]
+    fn a_horizontal_swipe_switches_spaces_when_it_ends() {
+        let mut t = GestureTracker::default();
+        assert_eq!(t.on_event(&dock(PHASE_BEGAN, 1, 0.0, 0.0)), Gesture::Other);
+        assert_eq!(
+            t.on_event(&dock(PHASE_CHANGED, 1, 0.2, 1.5)),
+            Gesture::Other
+        );
+        assert_eq!(
+            t.on_event(&dock(PHASE_CHANGED, 1, 0.6, 2.0)),
+            Gesture::Other
+        );
+        // The ended event may carry no progress: the last one counts.
+        assert_eq!(
+            t.on_event(&dock(PHASE_ENDED, 1, 0.0, 0.0)),
+            Gesture::SwitchSpace { next: true }
+        );
+        // The other way, a flick known only by its velocity.
+        t.on_event(&dock(PHASE_BEGAN, 1, 0.0, 0.0));
+        assert_eq!(
+            t.on_event(&dock(PHASE_ENDED, 1, 0.0, -3.0)),
+            Gesture::SwitchSpace { next: false }
+        );
+    }
+
+    #[test]
+    fn vertical_swipes_open_the_overview_and_cancelled_ones_nothing() {
+        let mut t = GestureTracker::default();
+        t.on_event(&dock(PHASE_BEGAN, 2, 0.0, 0.0));
+        t.on_event(&dock(PHASE_CHANGED, 2, -0.4, -1.0));
+        assert_eq!(
+            t.on_event(&dock(PHASE_ENDED, 2, 0.0, 0.0)),
+            Gesture::Overview
+        );
+        t.on_event(&dock(PHASE_BEGAN, 1, 0.0, 0.0));
+        t.on_event(&dock(PHASE_CHANGED, 1, 0.3, 1.0));
+        assert_eq!(
+            t.on_event(&dock(PHASE_CANCELLED, 1, 0.0, 0.0)),
+            Gesture::Other
+        );
+        // An end without any motion, and the thumb pinch (Launchpad), do nothing.
+        assert_eq!(t.on_event(&dock(PHASE_ENDED, 1, 0.0, 0.0)), Gesture::Other);
+        t.on_event(&dock(PHASE_BEGAN, 3, 0.0, 0.0));
+        assert_eq!(t.on_event(&dock(PHASE_ENDED, 3, 0.5, 0.0)), Gesture::Other);
+        // A swipe whose start was missed is still recognised.
+        t.on_event(&dock(PHASE_CHANGED, 1, -0.5, 0.0));
+        assert_eq!(
+            t.on_event(&dock(PHASE_ENDED, 1, 0.0, 0.0)),
+            Gesture::SwitchSpace { next: false }
+        );
+    }
+
+    #[test]
+    fn pinches_report_magnification_and_the_rest_is_other() {
+        let mut t = GestureTracker::default();
+        let zoom = RawGesture {
+            cgs_type: CGS_GESTURE,
+            hid_type: HID_ZOOM,
+            phase: PHASE_CHANGED,
+            magnification: 0.04,
+            ..RawGesture::default()
+        };
+        assert_eq!(
+            t.on_event(&zoom),
+            Gesture::Magnify {
+                delta: 0.04,
+                phase: GesturePhase::Changed
+            }
+        );
+        let bogus = RawGesture {
+            magnification: f64::NAN,
+            phase: PHASE_ENDED,
+            ..zoom
+        };
+        assert_eq!(
+            t.on_event(&bogus),
+            Gesture::Magnify {
+                delta: 0.0,
+                phase: GesturePhase::Ended
+            }
+        );
+        // Rotation, smart zoom, scroll companions.
+        for hid_type in [5, 22, 6] {
+            let other = RawGesture { hid_type, ..zoom };
+            assert_eq!(t.on_event(&other), Gesture::Other);
+        }
+        // A zoom-typed Dock event is not a pinch.
+        let odd = RawGesture {
+            cgs_type: CGS_DOCK_CONTROL,
+            ..zoom
+        };
+        assert_eq!(t.on_event(&odd), Gesture::Other);
+    }
 
     #[test]
     fn flags_changed_for_modifiers() {

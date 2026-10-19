@@ -26,6 +26,16 @@ impl Hid {
     pub const RIGHT_SHIFT: Hid = Hid(0x07_00E5);
     pub const RIGHT_ALT: Hid = Hid(0x07_00E6);
     pub const RIGHT_GUI: Hid = Hid(0x07_00E7);
+    pub const TAB: Hid = Hid(0x07_002B);
+    pub const SPACE: Hid = Hid(0x07_002C);
+    pub const RIGHT_ARROW: Hid = Hid(0x07_004F);
+    pub const LEFT_ARROW: Hid = Hid(0x07_0050);
+    pub const DOWN_ARROW: Hid = Hid(0x07_0051);
+    pub const UP_ARROW: Hid = Hid(0x07_0052);
+    /// The Mac's Fn / 🌐 key (Apple vendor top-case page). It has no native
+    /// code on either OS in the keymap, so it is never injected: the
+    /// controller turns a tap of it into the peer's language switch.
+    pub const APPLE_FN: Hid = Hid(0x00FF_0003);
 
     /// The eight modifier keys in `ModifierMask` bit order.
     pub const MODIFIERS: [Hid; 8] = [
@@ -364,6 +374,35 @@ pub enum CapturedEvent {
         down: bool,
         repeat: bool,
     },
+    /// A trackpad gesture (macOS).
+    Gesture(Gesture),
+}
+
+/// A trackpad gesture as the macOS capture backend recognises it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Gesture {
+    /// Two-finger pinch: the relative change of this event, > 0 when the
+    /// fingers spread (zoom in).
+    Magnify { delta: f64, phase: GesturePhase },
+    /// A finished horizontal three/four-finger swipe that switches Spaces:
+    /// to the next one (the Space on the right) or the previous one.
+    SwitchSpace { next: bool },
+    /// A finished vertical three/four-finger swipe: Mission Control or App
+    /// Exposé.
+    Overview,
+    /// Any other gesture event (rotation, smart zoom, Launchpad, the events
+    /// that accompany a swipe or a scroll): nothing to forward, but it must
+    /// not reach the local OS while the peer is controlled.
+    Other,
+}
+
+/// Where a continuous gesture is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GesturePhase {
+    Began,
+    Changed,
+    Ended,
+    Other,
 }
 
 /// Command from the Engine to the capture backend.

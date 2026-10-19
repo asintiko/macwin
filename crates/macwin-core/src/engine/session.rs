@@ -8,6 +8,7 @@ use crate::keys::{ButtonSet, KeySet, Pressed};
 use crate::latency::{LinkProbe, RateMeter};
 use crate::layout::Layout;
 use crate::remap::Remap;
+use crate::shortcuts::ZoomSteps;
 use crate::types::{Point, PointF, RoleKind};
 
 use super::PeerInfo;
@@ -42,6 +43,11 @@ pub(crate) struct Controlling {
     pub(crate) pre_grab: KeySet,
     /// Buttons forwarded down and not yet up.
     pub(crate) fwd_buttons: ButtonSet,
+    /// `Some` while Fn / 🌐 is held: `true` until another key or a button
+    /// goes down with it. Released alone, it switches the peer's language.
+    pub(crate) fn_tap: Option<bool>,
+    /// Pinch magnification not yet sent as a zoom step.
+    pub(crate) zoom: ZoomSteps,
 }
 
 /// One control period in which the peer drives this machine.

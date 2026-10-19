@@ -12,7 +12,7 @@ use macwin_core::engine::{Timings, TransportRole};
 use macwin_core::keymap;
 use macwin_core::latency::{Report, SessionStats};
 use macwin_core::types::{
-    CaptureFault, CapturedEvent, GrabCommand, Hid, InjectCommand, Point, ScreenInfo, Side,
+    CaptureFault, CapturedEvent, Gesture, GrabCommand, Hid, InjectCommand, Point, ScreenInfo, Side,
 };
 use macwin_net::discovery::{DISCOVERY_WAIT, responder_addr};
 use macwin_net::pairing::{PairInfo, PairingCode};
@@ -836,7 +836,7 @@ fn primary_center(screens: &[ScreenInfo]) -> Point {
 }
 
 fn describe_key(hid: Hid) -> String {
-    match keymap::name(hid) {
+    match keymap::name(hid).or((hid == Hid::APPLE_FN).then_some("Fn")) {
         Some(n) => format!("{n} ({:#08x})", hid.0),
         None => format!("{:#08x}", hid.0),
     }
@@ -878,6 +878,9 @@ impl CaptureSink for PrintSink {
                 if down { "down" } else { "up" },
                 if repeat { " (repeat)" } else { "" }
             ),
+            // The events accompanying every trackpad scroll would flood the output.
+            CapturedEvent::Gesture(Gesture::Other) => {}
+            CapturedEvent::Gesture(g) => println!("gesture {g:?}"),
         }
         !self.swallow
     }

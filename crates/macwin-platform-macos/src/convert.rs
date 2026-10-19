@@ -2,13 +2,20 @@
 
 use macwin_core::keymap::mac_to_hid;
 use macwin_core::os::macos::{
-    FlagsChange, KVK_CAPS_LOCK, flags_changed, scroll_from_fixed, scroll_from_points,
+    CGS_DOCK_CONTROL, CGS_GESTURE, FIELD_CGS_TYPE, FIELD_GESTURE_HID_TYPE, FIELD_GESTURE_PHASE,
+    FIELD_MAGNIFICATION, FIELD_SWIPE_MOTION, FIELD_SWIPE_PROGRESS, FIELD_SWIPE_VELOCITY_X,
+    FIELD_SWIPE_VELOCITY_Y, FlagsChange, KVK_CAPS_LOCK, KVK_FUNCTION, RawGesture, flags_changed,
+    fn_key_down, scroll_from_fixed, scroll_from_points,
 };
-use macwin_core::types::{CapturedEvent, MouseButton, PointF, WheelUnit};
+use macwin_core::types::{CapturedEvent, Hid, MouseButton, PointF, WheelUnit};
 use objc2_core_graphics::{CGEvent, CGEventField, CGEventMask, CGEventType};
 
+/// Trackpad gestures and Dock swipes (private CGS types, see `RawGesture`).
+const GESTURE: CGEventType = CGEventType(CGS_GESTURE);
+const DOCK_CONTROL: CGEventType = CGEventType(CGS_DOCK_CONTROL);
+
 /// Event types the tap listens to.
-pub(crate) const TAPPED: [CGEventType; 14] = [
+pub(crate) const TAPPED: [CGEventType; 16] = [
     CGEventType::MouseMoved,
     CGEventType::LeftMouseDown,
     CGEventType::LeftMouseUp,
@@ -23,6 +30,8 @@ pub(crate) const TAPPED: [CGEventType; 14] = [
     CGEventType::KeyDown,
     CGEventType::KeyUp,
     CGEventType::FlagsChanged,
+    GESTURE,
+    DOCK_CONTROL,
 ];
 
 pub(crate) fn event_mask() -> CGEventMask {
@@ -35,6 +44,31 @@ fn int(e: &CGEvent, f: CGEventField) -> i64 {
 
 fn double(e: &CGEvent, f: CGEventField) -> f64 {
     CGEvent::double_value_field(Some(e), f)
+}
+
+/// Whether `t` is a gesture event, handled by [`raw_gesture`] instead of
+/// [`convert`].
+pub(crate) fn is_gesture(t: CGEventType) -> bool {
+    t == GESTURE || t == DOCK_CONTROL
+}
+
+/// The fields of a gesture event that the gesture tracker reads.
+pub(crate) fn raw_gesture(t: CGEventType, e: &CGEvent) -> RawGesture {
+    let field = |f: u32| CGEventField(f);
+    let cgs_type = u32::try_from(int(e, field(FIELD_CGS_TYPE)))
+        .ok()
+        .filter(|&v| v == CGS_GESTURE || v == CGS_DOCK_CONTROL)
+        .unwrap_or(t.0);
+    RawGesture {
+        cgs_type,
+        hid_type: int(e, field(FIELD_GESTURE_HID_TYPE)),
+        phase: int(e, field(FIELD_GESTURE_PHASE)),
+        motion: int(e, field(FIELD_SWIPE_MOTION)),
+        progress: double(e, field(FIELD_SWIPE_PROGRESS)),
+        velocity_x: double(e, field(FIELD_SWIPE_VELOCITY_X)),
+        velocity_y: double(e, field(FIELD_SWIPE_VELOCITY_Y)),
+        magnification: double(e, field(FIELD_MAGNIFICATION)),
+    }
 }
 
 fn pos(e: &CGEvent) -> PointF {
@@ -113,6 +147,14 @@ pub(crate) fn convert(t: CGEventType, e: &CGEvent, out: &mut Vec<CapturedEvent>)
         }
         CGEventType::FlagsChanged => {
             let code = int(e, CGEventField::KeyboardEventKeycode) as u16;
+            if code == KVK_FUNCTION {
+                out.push(CapturedEvent::Key {
+                    hid: Hid::APPLE_FN,
+                    down: fn_key_down(CGEvent::flags(Some(e)).0),
+                    repeat: false,
+                });
+                return;
+            }
             let Some(hid) = mac_to_hid(code) else {
                 return;
             };
@@ -223,6 +265,42 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn fn_becomes_the_apple_fn_key() {
+        let e = CGEvent::new_keyboard_event(None, KVK_FUNCTION, true).unwrap();
+        CGEvent::set_flags(Some(&e), CGEventFlags(0x0080_0000));
+        let key = |down| CapturedEvent::Key {
+            hid: Hid::APPLE_FN,
+            down,
+            repeat: false,
+        };
+        assert_eq!(converted(CGEventType::FlagsChanged, &e), vec![key(true)]);
+        CGEvent::set_flags(Some(&e), CGEventFlags(0));
+        assert_eq!(converted(CGEventType::FlagsChanged, &e), vec![key(false)]);
+    }
+
+    #[test]
+    fn gesture_fields_are_read_from_the_event() {
+        assert!(is_gesture(GESTURE) && is_gesture(DOCK_CONTROL));
+        assert!(!is_gesture(CGEventType::ScrollWheel));
+        let e = CGEvent::new(None).unwrap();
+        let set_int =
+            |f: u32, v: i64| CGEvent::set_integer_value_field(Some(&e), CGEventField(f), v);
+        let set_double =
+            |f: u32, v: f64| CGEvent::set_double_value_field(Some(&e), CGEventField(f), v);
+        set_int(FIELD_GESTURE_HID_TYPE, 23);
+        set_int(FIELD_GESTURE_PHASE, 4);
+        set_int(FIELD_SWIPE_MOTION, 1);
+        set_double(FIELD_SWIPE_PROGRESS, -0.5);
+        set_double(FIELD_SWIPE_VELOCITY_X, -2.0);
+        let raw = raw_gesture(DOCK_CONTROL, &e);
+        assert_eq!(
+            (raw.cgs_type, raw.hid_type, raw.phase, raw.motion),
+            (CGS_DOCK_CONTROL, 23, 4, 1)
+        );
+        assert_eq!((raw.progress, raw.velocity_x), (-0.5, -2.0));
     }
 
     #[test]

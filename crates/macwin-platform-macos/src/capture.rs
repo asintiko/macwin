@@ -23,7 +23,7 @@ use std::sync::{Arc, Mutex, MutexGuard, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use macwin_core::os::macos::mask_from_flags;
+use macwin_core::os::macos::{GestureTracker, mask_from_flags};
 use macwin_core::os::{INJECT_TAG, left_park};
 use macwin_core::safety::EmergencyDetector;
 use macwin_core::types::{CaptureFault, CapturedEvent, GrabCommand, Point, PointF};
@@ -35,7 +35,7 @@ use objc2_core_graphics::{
 };
 use tracing::{info, warn};
 
-use crate::convert::{convert, event_mask};
+use crate::convert::{convert, event_mask, is_gesture, raw_gesture};
 use crate::cursor;
 
 /// Lease granted by a Grab until the first renewal arrives.
@@ -57,6 +57,7 @@ struct State {
     /// The cursor followed the mouse during this grab (logged once).
     drift_seen: bool,
     detector: EmergencyDetector,
+    gestures: GestureTracker,
 }
 
 struct Shared {
@@ -186,7 +187,13 @@ impl Shared {
             return true; // our own injection
         }
         let mut events = Vec::with_capacity(2);
-        convert(t, e, &mut events);
+        if is_gesture(t) {
+            let raw = raw_gesture(t, e);
+            let gesture = self.lock().gestures.on_event(&raw);
+            events.push(CapturedEvent::Gesture(gesture));
+        } else {
+            convert(t, e, &mut events);
+        }
         if events.is_empty() {
             return true;
         }
