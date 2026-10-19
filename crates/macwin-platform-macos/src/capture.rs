@@ -7,6 +7,13 @@
 //! - the grab lease, checked on every event and every 100 ms;
 //! - the OS disabling the tap (timeout / user input);
 //! - a panic in the callback.
+//!
+//! While grabbed the cursor is decoupled from the mouse and hidden, but
+//! `CGAssociateMouseAndMouseCursorPosition` only works for the frontmost app
+//! and MacWin runs in the background: WindowServer keeps moving the cursor
+//! even though the tap swallows the event. So every mouse move that carried
+//! it off its parking point warps it back (as lan-mouse and input-leap do);
+//! the motion itself is read from the event's delta fields.
 
 use std::ffi::c_void;
 use std::panic::{self, AssertUnwindSafe};
@@ -16,15 +23,15 @@ use std::sync::{Arc, Mutex, MutexGuard, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use macwin_core::os::INJECT_TAG;
 use macwin_core::os::macos::mask_from_flags;
+use macwin_core::os::{INJECT_TAG, left_park};
 use macwin_core::safety::EmergencyDetector;
-use macwin_core::types::{CaptureFault, CapturedEvent, GrabCommand};
+use macwin_core::types::{CaptureFault, CapturedEvent, GrabCommand, Point, PointF};
 use macwin_platform::{CaptureControl, CaptureSink, InputCapture, PlatformError};
 use objc2_core_foundation::{CFMachPort, CFRunLoop, kCFRunLoopDefaultMode};
 use objc2_core_graphics::{
-    CGEvent, CGEventField, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement,
-    CGEventTapProxy, CGEventType,
+    CGEvent, CGEventField, CGEventSource, CGEventSourceStateID, CGEventTapLocation,
+    CGEventTapOptions, CGEventTapPlacement, CGEventTapProxy, CGEventType,
 };
 use tracing::{info, warn};
 
@@ -35,12 +42,20 @@ use crate::cursor;
 const INITIAL_LEASE: Duration = Duration::from_secs(2);
 /// Run-loop slice between stop and lease checks.
 const SLICE_SECONDS: f64 = 0.1;
+/// How long local mouse events are muted after a cursor warp. The default
+/// 0.25 s makes the cursor hesitate; 0 lets queued moves undo the warp
+/// (lan-mouse settled on 0.05 s by trial).
+const WARP_SUPPRESSION_SECONDS: f64 = 0.05;
 
 #[derive(Default)]
 struct State {
     grabbed: bool,
+    /// Where the cursor waits while grabbed.
+    park: Option<Point>,
     lease: Option<Instant>,
     cursor_hidden: bool,
+    /// The cursor followed the mouse during this grab (logged once).
+    drift_seen: bool,
     detector: EmergencyDetector,
 }
 
@@ -62,6 +77,7 @@ impl Shared {
         let mut st = self.lock();
         let was = st.grabbed;
         st.grabbed = false;
+        st.park = None;
         st.lease = None;
         cursor::associate(true);
         if st.cursor_hidden {
@@ -76,6 +92,8 @@ impl Shared {
         match cmd {
             GrabCommand::Grab { exit } => {
                 st.grabbed = true;
+                st.park = Some(exit);
+                st.drift_seen = false;
                 st.lease = Some(Instant::now() + INITIAL_LEASE);
                 cursor::warp(exit);
                 cursor::associate(false);
@@ -86,6 +104,7 @@ impl Shared {
             }
             GrabCommand::Release { warp_to } => {
                 st.grabbed = false;
+                st.park = None;
                 st.lease = None;
                 cursor::warp(warp_to);
                 cursor::associate(true);
@@ -96,6 +115,7 @@ impl Shared {
             }
             GrabCommand::Rearm => {
                 st.grabbed = false;
+                st.park = None;
                 st.lease = None;
                 cursor::associate(true);
                 if st.cursor_hidden {
@@ -103,6 +123,24 @@ impl Shared {
                     st.cursor_hidden = false;
                 }
             }
+        }
+    }
+
+    /// Warps a grabbed cursor back to its parking point if a mouse move
+    /// carried it away (MacWin in the background; see the module docs).
+    fn keep_parked(&self, at: PointF) {
+        let mut st = self.lock();
+        let park = match (st.grabbed, st.park) {
+            (true, Some(park)) => park,
+            _ => return,
+        };
+        if !left_park(at, park) {
+            return;
+        }
+        cursor::warp(park);
+        if !st.drift_seen {
+            st.drift_seen = true;
+            info!("the cursor follows the mouse while grabbed: warping it back on every move");
         }
     }
 
@@ -177,8 +215,20 @@ impl Shared {
         for ev in events {
             deliver &= self.sink.on_event(ev);
         }
+        // After the sink: the Engine may just have released the grab.
+        if is_motion(t) {
+            let p = CGEvent::location(Some(e));
+            self.keep_parked(PointF::new(p.x, p.y));
+        }
         deliver
     }
+}
+
+fn is_motion(t: CGEventType) -> bool {
+    t == CGEventType::MouseMoved
+        || t == CGEventType::LeftMouseDragged
+        || t == CGEventType::RightMouseDragged
+        || t == CGEventType::OtherMouseDragged
 }
 
 unsafe extern "C-unwind" fn tap_callback(
@@ -208,6 +258,15 @@ unsafe extern "C-unwind" fn tap_callback(
 }
 
 fn run_tap(shared: Arc<Shared>, ready: mpsc::Sender<Result<(), PlatformError>>) {
+    // Warps use the combined session state's suppression interval; the
+    // source lives as long as the tap so the setting stays.
+    let suppression = CGEventSource::new(CGEventSourceStateID::CombinedSessionState);
+    if let Some(source) = &suppression {
+        CGEventSource::set_local_events_suppression_interval(
+            Some(source),
+            WARP_SUPPRESSION_SECONDS,
+        );
+    }
     let user_info = Arc::as_ptr(&shared) as *mut c_void;
     // SAFETY: `tap_callback` follows the CGEventTapCallBack contract and
     // `user_info` points to `shared`, which this function keeps alive until

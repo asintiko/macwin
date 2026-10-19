@@ -4,10 +4,12 @@
 //! Grab: swallowed mouse moves leave the cursor parked at the exit point,
 //! so each move's `pt - park` is the post-acceleration delta. A tiny
 //! layered topmost window with a NULL cursor sits under the parked cursor to
-//! hide it. Fail-safes (released locally first, then reported): the
-//! emergency chord, the grab lease (checked per event and every 100 ms) and a
-//! panic in the hook. Hooks must return fast: Windows silently removes slow
-//! low-level hooks.
+//! hide it. While grabbed, mouse moves never reach the OS (even if the Engine
+//! disagrees; the lease ends such a mismatch) and a cursor moved by anything
+//! else (touch, pen, another app) is parked again every 100 ms. Fail-safes
+//! (released locally first, then reported): the emergency chord, the grab
+//! lease (checked per event and every 100 ms) and a panic in the hook. Hooks
+//! must return fast: Windows silently removes slow low-level hooks.
 
 use std::panic::{self, AssertUnwindSafe};
 use std::ptr;
@@ -16,22 +18,24 @@ use std::sync::{Arc, Mutex, MutexGuard, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use macwin_core::os::left_park;
 use macwin_core::os::windows::{LowLevelMouse, classify_key, classify_mouse, scan_to_hid};
 use macwin_core::safety::EmergencyDetector;
 use macwin_core::types::{CaptureFault, CapturedEvent, GrabCommand, Point, PointF, WheelUnit};
 use macwin_platform::{CaptureControl, CaptureSink, InputCapture, PlatformError};
 use tracing::{info, warn};
-use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Threading::GetCurrentThreadId;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW,
-    HC_ACTION, HHOOK, HWND_TOPMOST, KBDLLHOOKSTRUCT, KillTimer, LLKHF_EXTENDED, LLKHF_INJECTED,
-    LLMHF_INJECTED, LWA_ALPHA, MSG, MSLLHOOKSTRUCT, PostThreadMessageW, RegisterClassExW, SW_HIDE,
-    SWP_NOACTIVATE, SWP_SHOWWINDOW, SetCursor, SetCursorPos, SetLayeredWindowAttributes, SetTimer,
-    SetWindowPos, SetWindowsHookExW, ShowWindow, TranslateMessage, UnhookWindowsHookEx,
-    WH_KEYBOARD_LL, WH_MOUSE_LL, WM_APP, WM_QUIT, WM_SETCURSOR, WM_TIMER, WNDCLASSEXW,
-    WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    CallNextHookEx, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetCursorPos,
+    GetMessageW, HC_ACTION, HHOOK, HWND_TOPMOST, KBDLLHOOKSTRUCT, KillTimer, LLKHF_EXTENDED,
+    LLKHF_INJECTED, LLMHF_INJECTED, LWA_ALPHA, MSG, MSLLHOOKSTRUCT, PostThreadMessageW,
+    RegisterClassExW, SW_HIDE, SWP_NOACTIVATE, SWP_SHOWWINDOW, SetCursor, SetCursorPos,
+    SetLayeredWindowAttributes, SetTimer, SetWindowPos, SetWindowsHookExW, ShowWindow,
+    TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_APP, WM_QUIT,
+    WM_SETCURSOR, WM_TIMER, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    WS_EX_TOPMOST, WS_POPUP,
 };
 
 const INITIAL_LEASE: Duration = Duration::from_secs(2);
@@ -47,6 +51,8 @@ struct State {
     park: Point,
     last_pt: Option<Point>,
     lease: Option<Instant>,
+    /// The cursor was found off `park` during this grab (logged once).
+    drift_seen: bool,
     detector: EmergencyDetector,
 }
 
@@ -110,6 +116,27 @@ impl Shared {
         if expired && self.release_locally() {
             self.notify_fault(CaptureFault::LeaseExpired);
         }
+    }
+
+    /// The parking point when the cursor is grabbed but no longer on it.
+    fn drifted_park(&self) -> Option<Point> {
+        let mut st = self.lock();
+        if !st.grabbed {
+            return None;
+        }
+        let mut pt = POINT { x: 0, y: 0 };
+        // SAFETY: GetCursorPos only writes the POINT we own.
+        if unsafe { GetCursorPos(&mut pt) } == 0 {
+            return None; // e.g. the secure desktop is active
+        }
+        if !left_park(Point::new(pt.x, pt.y).to_f(), st.park) {
+            return None;
+        }
+        if !st.drift_seen {
+            st.drift_seen = true;
+            warn!("the cursor moved while input was grabbed: parking it again");
+        }
+        Some(st.park)
     }
 
     /// Runs the fail-safes, then asks the sink. Returns true to swallow.
@@ -191,7 +218,11 @@ impl Shared {
                 unit: WheelUnit::Notch120,
             },
         };
-        self.dispatch(ev, None)
+        let is_move = matches!(ev, CapturedEvent::MouseMove { .. });
+        let swallow = self.dispatch(ev, None);
+        // A grabbed cursor stays parked whatever the sink said; a fail-safe
+        // or the Engine's release has already cleared `grabbed`.
+        swallow || (is_move && self.lock().grabbed)
     }
 }
 
@@ -297,6 +328,30 @@ fn point_of(msg: &MSG) -> Point {
     Point::new(msg.wParam as isize as i32, msg.lParam as i32)
 }
 
+/// Puts the cursor (and the hider under it) on `p`.
+///
+/// # Safety
+/// Must run on the capture thread, which owns `hider`.
+unsafe fn park_cursor(hider: HWND, p: Point) {
+    // SAFETY: plain Win32 calls on a window this thread created.
+    unsafe {
+        SetCursorPos(p.x, p.y);
+        if !hider.is_null() {
+            SetWindowPos(
+                hider,
+                HWND_TOPMOST,
+                p.x - HIDER_SIZE / 2,
+                p.y - HIDER_SIZE / 2,
+                HIDER_SIZE,
+                HIDER_SIZE,
+                SWP_NOACTIVATE | SWP_SHOWWINDOW,
+            );
+            // Re-position so Windows sends WM_SETCURSOR to the hider.
+            SetCursorPos(p.x, p.y);
+        }
+    }
+}
+
 fn run_hooks(shared: Arc<Shared>, ready: mpsc::Sender<Result<(), PlatformError>>) {
     // SAFETY: plain Win32 calls on this thread; the hook procedures only read
     // the hook structs Windows passes them.
@@ -334,21 +389,7 @@ fn run_hooks(shared: Arc<Shared>, ready: mpsc::Sender<Result<(), PlatformError>>
             match msg.message {
                 WM_GRAB => {
                     let p = point_of(&msg);
-                    SetCursorPos(p.x, p.y);
-                    shared.lock().park = p;
-                    if !hider.is_null() {
-                        SetWindowPos(
-                            hider,
-                            HWND_TOPMOST,
-                            p.x - HIDER_SIZE / 2,
-                            p.y - HIDER_SIZE / 2,
-                            HIDER_SIZE,
-                            HIDER_SIZE,
-                            SWP_NOACTIVATE | SWP_SHOWWINDOW,
-                        );
-                        // Re-position so Windows sends WM_SETCURSOR to the hider.
-                        SetCursorPos(p.x, p.y);
-                    }
+                    park_cursor(hider, p);
                     shared.lock().park = p;
                 }
                 WM_RELEASE => {
@@ -363,7 +404,12 @@ fn run_hooks(shared: Arc<Shared>, ready: mpsc::Sender<Result<(), PlatformError>>
                         ShowWindow(hider, SW_HIDE);
                     }
                 }
-                WM_TIMER if msg.hwnd.is_null() => shared.check_lease(),
+                WM_TIMER if msg.hwnd.is_null() => {
+                    shared.check_lease();
+                    if let Some(p) = shared.drifted_park() {
+                        park_cursor(hider, p);
+                    }
+                }
                 _ => {
                     TranslateMessage(&msg);
                     DispatchMessageW(&msg);
@@ -406,6 +452,7 @@ impl CaptureControl for WinControl {
         match cmd {
             GrabCommand::Grab { exit } => {
                 st.grabbed = true;
+                st.drift_seen = false;
                 st.park = st.last_pt.unwrap_or(exit);
                 st.lease = Some(Instant::now() + INITIAL_LEASE);
                 drop(st);
