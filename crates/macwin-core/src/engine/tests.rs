@@ -1719,3 +1719,64 @@ proptest! {
         prop_assert!(!h.grabbed);
     }
 }
+
+#[test]
+fn datagram_ping_measures_rtt_and_loss() {
+    let t0 = Instant::now();
+    let mut e = mac_session(t0, TransportRole::Dialer);
+    let Some(Action::SendDatagram(DatagramMsg::Ping(first))) = e.poll_ping(t0) else {
+        panic!("a ping is due as soon as the session starts");
+    };
+    assert_eq!(e.poll_ping(t0 + 50 * MS), None);
+    let pong = Pong {
+        id: first.id,
+        ping_sent_micros: first.sent_micros,
+    };
+    assert_eq!(e.on_datagram(t0 + 3 * MS, DatagramMsg::Pong(pong)), vec![]);
+    assert!(matches!(
+        e.poll_ping(t0 + 250 * MS),
+        Some(Action::SendDatagram(DatagramMsg::Ping(_)))
+    ));
+    // The second ping is never answered.
+    e.poll_ping(t0 + 1250 * MS);
+    let s = e.stats(t0 + 1250 * MS).unwrap();
+    assert_eq!(s.ping.rtt_p50, Some(3 * MS));
+    assert_eq!((s.ping.answered, s.ping.lost), (1, 1));
+
+    // No session: no ping and no statistics.
+    e.on_disconnected(t0 + 1300 * MS);
+    assert_eq!(e.poll_ping(t0 + 1500 * MS), None);
+    assert_eq!(e.stats(t0 + 1500 * MS), None);
+}
+
+#[test]
+fn mouse_datagrams_are_counted_with_gaps_per_control_period() {
+    let t0 = Instant::now();
+    let mut w = win_controlled(t0);
+    let abs = |epoch, seq| {
+        DatagramMsg::MouseAbs(MouseAbs {
+            epoch,
+            seq,
+            at: Point::new(10, 10),
+        })
+    };
+    w.on_datagram(t0, abs(1, 1));
+    w.on_datagram(t0 + MS, abs(1, 2));
+    // 3 and 4 never arrive in time; 4 comes late and is dropped.
+    w.on_datagram(t0 + 2 * MS, abs(1, 5));
+    assert_eq!(w.on_datagram(t0 + 3 * MS, abs(1, 4)), vec![]);
+    let s = w.stats(t0 + 10 * MS).unwrap();
+    assert_eq!(
+        (s.mouse_applied, s.mouse_skipped, s.mouse_in_per_sec),
+        (3, 2, 3)
+    );
+    assert_eq!(s.mouse_out_per_sec, 0);
+
+    // The controller counts what it sends.
+    let mut m = mac_controlling(t0);
+    for i in 1..=5u32 {
+        m.on_local_event(t0 + i * MS, delta(1.0, 0.0));
+    }
+    let s = m.stats(t0 + 10 * MS).unwrap();
+    assert_eq!((s.mouse_out_per_sec, s.mouse_in_per_sec), (5, 0));
+}

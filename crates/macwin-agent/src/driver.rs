@@ -15,6 +15,7 @@ use macwin_core::arrange::{Edge, Placement};
 use macwin_core::engine::{
     Action, CloseReason, Engine, EngineConfig, PeerInfo, Timings, TransportRole,
 };
+use macwin_core::latency::SessionStats;
 use macwin_core::msg::{
     CAP_CLIPBOARD_FILES, CAP_CLIPBOARD_IMAGE, CAP_CLIPBOARD_TEXT, CAP_INPUT_CAPTURE,
     CAP_INPUT_INJECT, CAP_WHEEL_PIXEL, Hello,
@@ -149,6 +150,8 @@ impl Stopper {
 pub struct SessionHandle {
     /// The current role, updated after every Engine step.
     pub role: watch::Receiver<RoleKind>,
+    /// Link and mouse statistics, updated with every datagram ping.
+    pub stats: watch::Receiver<Option<SessionStats>>,
     shutdown: Arc<Notify>,
     link: LinkSender,
     join: JoinHandle<SessionEnd>,
@@ -194,6 +197,7 @@ struct Core {
     capture: Option<Arc<dyn CaptureControl>>,
     link: LinkSender,
     role_tx: watch::Sender<RoleKind>,
+    stats_tx: watch::Sender<Option<SessionStats>>,
     end: Option<SessionEnd>,
 }
 
@@ -394,12 +398,14 @@ pub fn spawn_session(
         );
     }
     let (role_tx, role_rx) = watch::channel(RoleKind::Idle);
+    let (stats_tx, stats_rx) = watch::channel(None);
     let core = Arc::new(Mutex::new(Core {
         engine,
         injector,
         capture: None,
         link: tx.clone(),
         role_tx,
+        stats_tx,
         end: None,
     }));
     let wake = Arc::new(Notify::new());
@@ -434,6 +440,7 @@ pub fn spawn_session(
     ));
     Ok(SessionHandle {
         role: role_rx,
+        stats: stats_rx,
         shutdown,
         link: tx,
         join,
@@ -517,8 +524,16 @@ async fn run(
             }
             _ = tick.tick() => {
                 let mut c = lock(&core);
-                let a = c.engine.on_tick(Instant::now());
+                let now = Instant::now();
+                let mut a = c.engine.on_tick(now);
+                let ping = c.engine.poll_ping(now);
+                let pinged = ping.is_some();
+                a.extend(ping);
                 c.dispatch(a);
+                if pinged {
+                    let stats = c.engine.stats(now);
+                    c.stats_tx.send_replace(stats);
+                }
             }
             () = shutdown.notified() => {
                 let mut c = lock(&core);

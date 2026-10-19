@@ -27,6 +27,7 @@ use crate::arrange::{Placement, resolve};
 use crate::geometry::ScreenSet;
 use crate::heartbeat::HeartbeatMonitor;
 use crate::keys::{ButtonSet, Pressed};
+use crate::latency::{LinkProbe, RateMeter, SessionStats};
 use crate::layout::{Layout, Step};
 use crate::msg::{
     ButtonMsg, CAP_INPUT_INJECT, CAP_WHEEL_PIXEL, ControlMsg, DatagramMsg, Enter, Heartbeat,
@@ -295,6 +296,12 @@ impl Engine {
             peer_takes_pixels: peer.capabilities.iter().any(|c| c == CAP_WHEEL_PIXEL),
             seq: 0,
             last_seq: 0,
+            last_seq_epoch: 0,
+            probe: LinkProbe::new(now),
+            mouse_out: RateMeter::default(),
+            mouse_in: RateMeter::default(),
+            mouse_applied: 0,
+            mouse_skipped: 0,
             peer,
         };
         info!(peer = %session.peer.device_name, ?role, "session started");
@@ -359,6 +366,27 @@ impl Engine {
         actions
     }
 
+    /// The datagram ping, when one is due; call it with every tick. The
+    /// answers feed [`Engine::stats`].
+    pub fn poll_ping(&mut self, now: Instant) -> Option<Action> {
+        let s = self.session.as_mut()?;
+        s.probe
+            .poll(now)
+            .map(|p| Action::SendDatagram(DatagramMsg::Ping(p)))
+    }
+
+    /// Link and mouse statistics of the current session.
+    pub fn stats(&self, now: Instant) -> Option<SessionStats> {
+        let s = self.session.as_ref()?;
+        Some(SessionStats {
+            ping: s.probe.stats(),
+            mouse_out_per_sec: s.mouse_out.per_second(now),
+            mouse_in_per_sec: s.mouse_in.per_second(now),
+            mouse_applied: s.mouse_applied,
+            mouse_skipped: s.mouse_skipped,
+        })
+    }
+
     /// A capture fail-safe fired; the backend has already released locally.
     pub fn on_capture_fault(&mut self, _now: Instant, fault: CaptureFault) -> Vec<Action> {
         let mut actions = Vec::new();
@@ -386,7 +414,7 @@ impl Engine {
         let ev = self.track_local(ev);
         match self.role() {
             RoleKind::Idle => self.local_idle(now, ev),
-            RoleKind::Controlling => self.local_controlling(ev),
+            RoleKind::Controlling => self.local_controlling(now, ev),
             RoleKind::Controlled => self.local_controlled(now, ev),
         }
     }
@@ -487,7 +515,7 @@ impl Engine {
         swallow(actions)
     }
 
-    fn local_controlling(&mut self, ev: CapturedEvent) -> LocalOutcome {
+    fn local_controlling(&mut self, now: Instant, ev: CapturedEvent) -> LocalOutcome {
         let Some(s) = self.session.as_mut() else {
             return deliver(Vec::new());
         };
@@ -552,6 +580,7 @@ impl Engine {
                     Step::Moved(v) => {
                         c.v = v;
                         s.seq += 1;
+                        s.mouse_out.record(now);
                         swallow(vec![Action::SendDatagram(DatagramMsg::MouseAbs(
                             MouseAbs {
                                 epoch: c.epoch,
@@ -842,7 +871,10 @@ impl Engine {
                 id: p.id,
                 ping_sent_micros: p.sent_micros,
             }))],
-            DatagramMsg::Pong(_) => Vec::new(),
+            DatagramMsg::Pong(p) => {
+                s.probe.on_pong(now, p);
+                Vec::new()
+            }
             DatagramMsg::MouseAbs(ma) => {
                 let Role::Controlled(c) = &mut s.role else {
                     return Vec::new();
@@ -850,7 +882,13 @@ impl Engine {
                 if ma.epoch != c.epoch || ma.seq <= s.last_seq {
                     return Vec::new();
                 }
+                if s.last_seq_epoch == ma.epoch {
+                    s.mouse_skipped += ma.seq - s.last_seq - 1;
+                }
+                s.last_seq_epoch = ma.epoch;
                 s.last_seq = ma.seq;
+                s.mouse_applied += 1;
+                s.mouse_in.record(now);
                 let at = s.layout.local().clamp(ma.at);
                 c.last_pos = at;
                 vec![Action::Inject(InjectCommand::MoveTo(at))]

@@ -13,6 +13,7 @@ pub mod geometry;
 pub mod heartbeat;
 pub mod keymap;
 pub mod keys;
+pub mod latency;
 pub mod layout;
 pub mod msg;
 pub mod os;

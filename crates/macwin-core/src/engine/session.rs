@@ -5,6 +5,7 @@ use std::time::Instant;
 use crate::arrange::Edge;
 use crate::heartbeat::HeartbeatMonitor;
 use crate::keys::{ButtonSet, KeySet, Pressed};
+use crate::latency::{LinkProbe, RateMeter};
 use crate::layout::Layout;
 use crate::remap::Remap;
 use crate::types::{Point, PointF, RoleKind};
@@ -99,6 +100,14 @@ pub(crate) struct Session {
     pub(crate) seq: u64,
     /// Last datagram sequence number accepted.
     pub(crate) last_seq: u64,
+    /// Epoch of the datagram that set `last_seq`.
+    pub(crate) last_seq_epoch: u64,
+    /// The datagram ping and its statistics.
+    pub(crate) probe: LinkProbe,
+    pub(crate) mouse_out: RateMeter,
+    pub(crate) mouse_in: RateMeter,
+    pub(crate) mouse_applied: u64,
+    pub(crate) mouse_skipped: u64,
 }
 
 impl Session {

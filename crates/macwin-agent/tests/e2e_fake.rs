@@ -963,3 +963,38 @@ async fn the_capture_backend_lives_exactly_as_long_as_the_session() {
     assert_eq!(b_end, SessionEnd::PeerClosed);
     wait_until("B's backend released", || b.capture.backend_dropped()).await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn both_sides_measure_the_link_and_count_mouse_datagrams() {
+    let (a, b) = start().await;
+    let answered = |p: &Peer| {
+        p.handle
+            .stats
+            .borrow()
+            .is_some_and(|s| s.ping.answered >= 2 && s.ping.rtt_p95.is_some())
+    };
+    wait_until("ping answers on A", || answered(&a)).await;
+    wait_until("ping answers on B", || answered(&b)).await;
+    let rtt = a.handle.stats.borrow().unwrap().ping.rtt_p95.unwrap();
+    assert!(rtt < Duration::from_secs(1), "loopback RTT {rtt:?}");
+
+    a_controls_b(&a, &b).await;
+    for _ in 0..10 {
+        a.capture.emit(delta(3.0, 0.0));
+    }
+    // The next ping publishes the counters.
+    wait_until("B counts applied mouse datagrams", || {
+        b.handle
+            .stats
+            .borrow()
+            .is_some_and(|s| s.mouse_applied >= 10 && s.mouse_skipped == 0)
+    })
+    .await;
+    wait_until("A counts sent mouse datagrams", || {
+        a.handle
+            .stats
+            .borrow()
+            .is_some_and(|s| s.mouse_out_per_sec >= 10)
+    })
+    .await;
+}
