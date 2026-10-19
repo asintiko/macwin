@@ -272,6 +272,7 @@ automatically.
 macwin probe screens                 # monitors in native coordinates
 macwin probe permissions [--prompt]  # macOS: Accessibility, Input Monitoring, Secure Input
 macwin probe clipboard [--watch]     # format names and sizes, never the content
+macwin probe latency [--seconds 30]  # share for a while, then print the link and timing report
 macwin spike capture [--grab]        # print (and with --grab, swallow) local input
 macwin spike inject --demo           # cursor draws a square, then "hello" is typed
 macwin spike net --listen 0.0.0.0:47800 --peer-fp <hex>    # latency, with manual pins
