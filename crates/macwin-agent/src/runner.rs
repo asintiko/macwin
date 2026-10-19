@@ -15,6 +15,7 @@ use std::time::Duration;
 use anyhow::{Context, bail};
 use macwin_core::arrange::Placement;
 use macwin_core::engine::TransportRole;
+use macwin_core::latency::SessionStats;
 use macwin_core::msg::Hello;
 use macwin_core::types::{RoleKind, ScreenInfo};
 use macwin_net::discovery::{Offer, Responder, find_peer};
@@ -79,6 +80,8 @@ pub enum RunEvent {
     Dialing(String),
     Connected {
         name: String,
+        /// The peer's MacWin version, from its Hello.
+        version: String,
         remote: SocketAddr,
         /// The peer's screens, from its Hello.
         screens: Vec<ScreenInfo>,
@@ -89,6 +92,8 @@ pub enum RunEvent {
     /// session there is up; later dials use that address.
     PeerFound(SocketAddr),
     Role(RoleKind),
+    /// Link and timing statistics, after every datagram ping.
+    Stats(SessionStats),
     Ended(SessionEnd),
     /// A connection attempt failed; the next one starts after `after`.
     Retrying {
@@ -367,6 +372,7 @@ pub async fn run(
         }
         on_event(RunEvent::Connected {
             name: session.peer.device_name.clone(),
+            version: session.peer.agent_version.clone(),
             remote: session.remote,
             screens: session.peer.screens.clone(),
             placement: session.peer.placement,
@@ -398,6 +404,7 @@ pub async fn run(
         let stopper = handle.stopper();
         let link = handle.link();
         let mut roles = handle.role.clone();
+        let mut stats = handle.stats.clone();
         let join = handle.join();
         tokio::pin!(join);
         let end = loop {
@@ -405,6 +412,15 @@ pub async fn run(
                 end = &mut join => break end,
                 changed = roles.changed() => match changed {
                     Ok(()) => on_event(RunEvent::Role(*roles.borrow_and_update())),
+                    Err(_) => break (&mut join).await,
+                },
+                changed = stats.changed() => match changed {
+                    Ok(()) => {
+                        let latest = *stats.borrow_and_update();
+                        if let Some(s) = latest {
+                            on_event(RunEvent::Stats(s));
+                        }
+                    }
                     Err(_) => break (&mut join).await,
                 },
                 () = stopped(&mut stop) => {

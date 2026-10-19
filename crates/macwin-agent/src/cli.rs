@@ -105,6 +105,13 @@ pub enum Probe {
         #[arg(long)]
         watch: bool,
     },
+    /// Share with the paired computer for a while (quit the MacWin app
+    /// first), then print the link and timing report.
+    Latency {
+        /// How long to measure once connected.
+        #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u64).range(5..=600))]
+        seconds: u64,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -310,6 +317,19 @@ mod tests {
                 .command,
             Command::Probe(Probe::Clipboard { watch: true })
         ));
+        assert!(matches!(
+            Cli::try_parse_from(["macwin", "probe", "latency"])
+                .unwrap()
+                .command,
+            Command::Probe(Probe::Latency { seconds: 30 })
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["macwin", "probe", "latency", "--seconds", "90"])
+                .unwrap()
+                .command,
+            Command::Probe(Probe::Latency { seconds: 90 })
+        ));
+        assert!(Cli::try_parse_from(["macwin", "probe", "latency", "--seconds", "1"]).is_err());
     }
 
     #[test]

@@ -10,6 +10,7 @@ use anyhow::{Context, anyhow, bail};
 use macwin_core::arrange::Placement;
 use macwin_core::engine::{Timings, TransportRole};
 use macwin_core::keymap;
+use macwin_core::latency::{Report, SessionStats};
 use macwin_core::types::{
     CaptureFault, CapturedEvent, GrabCommand, Hid, InjectCommand, Point, ScreenInfo, Side,
 };
@@ -22,7 +23,7 @@ use tracing::{error, info, warn};
 use crate::autostart::{self, AutostartState};
 use crate::cli::{AutostartArg, PairArgs, SpikeCaptureArgs, SpikeKvmArgs, SpikeNetArgs};
 use crate::config::{
-    Config, edge_name, normalize_address, os_name, remember_peer_address, side_name,
+    Config, PeerConfig, edge_name, normalize_address, os_name, remember_peer_address, side_name,
 };
 use crate::driver::{
     ClipboardSettings, Connected, SessionConfig, SessionEnd, kvm_hello, spawn_session,
@@ -292,6 +293,7 @@ fn print_event(e: RunEvent) {
         RunEvent::Connected { name, remote, .. } => println!("connected to \"{name}\" ({remote})"),
         RunEvent::PeerFound(addr) => println!("found the other machine at its new address {addr}"),
         RunEvent::Role(role) => info!(?role, "role"),
+        RunEvent::Stats(_) => return,
         RunEvent::Ended(end) => println!("session ended: {end:?}"),
         RunEvent::Retrying { after, error } if after.is_zero() => {
             println!("a connection attempt failed: {error}")
@@ -314,10 +316,21 @@ fn cache_dir() -> anyhow::Result<PathBuf> {
 const ALREADY_RUNNING: &str =
     "MacWin is already running on this computer (the app or `macwin run`); quit it first";
 
-pub async fn run() -> anyhow::Result<()> {
+/// What `macwin run` and `macwin probe latency` share.
+struct RunSetup {
+    _lock: instance::InstanceLock,
+    os: macwin_core::types::Os,
+    identity: Identity,
+    config_dir: PathBuf,
+    peer: PeerConfig,
+    placement: Option<Placement>,
+    opts: RunOptions,
+}
+
+fn prepare_run() -> anyhow::Result<RunSetup> {
     let os = supported_os()?;
     platform::init();
-    let _lock = instance::acquire(&cache_dir()?)?.context(ALREADY_RUNNING)?;
+    let lock = instance::acquire(&cache_dir()?)?.context(ALREADY_RUNNING)?;
     let id = load_identity()?;
     let config = Config::load(&id.config_dir)?;
     let peer = config.peer.clone().context(
@@ -332,8 +345,35 @@ pub async fn run() -> anyhow::Result<()> {
     })?;
     let staging = staging_dir()?;
     let session = session_config(&config, os, device_name(), placement, staging);
-    let with_clipboard = session.clipboard.is_some();
-    let sharing = match &session.clipboard {
+    let mode = match &peer.address {
+        Some(a) => Mode::Dial(a.clone()),
+        None => Mode::Listen(config.listen),
+    };
+    let opts = RunOptions {
+        session,
+        mode,
+        peer: peer.fingerprint,
+        retry_min: runner::RETRY_MIN,
+        retry_max: runner::RETRY_MAX,
+        connect_timeout: runner::CONNECT_TIMEOUT,
+        discovery: run_discovery(&config),
+    };
+    Ok(RunSetup {
+        _lock: lock,
+        os,
+        identity: id.identity,
+        config_dir: id.config_dir,
+        peer,
+        placement,
+        opts,
+    })
+}
+
+pub async fn run() -> anyhow::Result<()> {
+    let setup = prepare_run()?;
+    let (peer, placement) = (&setup.peer, setup.placement);
+    let with_clipboard = setup.opts.session.clipboard.is_some();
+    let sharing = match &setup.opts.session.clipboard {
         None => "off".to_string(),
         Some(s) => {
             let mut kinds = vec!["text"];
@@ -346,11 +386,6 @@ pub async fn run() -> anyhow::Result<()> {
             kinds.join(", ")
         }
     };
-    let mode = match &peer.address {
-        Some(a) => Mode::Dial(a.clone()),
-        None => Mode::Listen(config.listen),
-    };
-    let discovery = run_discovery(&config);
     let whose = match placement {
         Some(p) => format!(
             "whose screens are on the {} of {}",
@@ -371,16 +406,7 @@ pub async fn run() -> anyhow::Result<()> {
         let _ = tokio::signal::ctrl_c().await;
         let _ = stop_tx.send(true);
     });
-    let opts = RunOptions {
-        session,
-        mode,
-        peer: peer.fingerprint,
-        retry_min: runner::RETRY_MIN,
-        retry_max: runner::RETRY_MAX,
-        connect_timeout: runner::CONNECT_TIMEOUT,
-        discovery,
-    };
-    let dir = id.config_dir.clone();
+    let dir = setup.config_dir.clone();
     let peer_fp = peer.fingerprint;
     let on_event = move |e: RunEvent| {
         if let RunEvent::PeerFound(addr) = &e {
@@ -389,8 +415,8 @@ pub async fn run() -> anyhow::Result<()> {
         print_event(e);
     };
     let exit = runner::run(
-        opts,
-        id.identity,
+        setup.opts,
+        setup.identity,
         || platform::backends(with_clipboard),
         on_event,
         stop_rx,
@@ -399,6 +425,122 @@ pub async fn run() -> anyhow::Result<()> {
     match exit {
         RunExit::Stopped => println!("stopped"),
         RunExit::EmergencyStop => println!("stopped by the emergency chord"),
+    }
+    Ok(())
+}
+
+// ---------- macwin probe latency ----------
+
+/// How long `probe latency` waits for the first connection.
+const PROBE_CONNECT_WAIT: Duration = Duration::from_secs(60);
+
+#[derive(Default)]
+struct Measured {
+    /// When the first session started, and the other computer as reported.
+    connected: Option<(Instant, String)>,
+    stats: Option<SessionStats>,
+    peak_out: u32,
+    peak_in: u32,
+}
+
+/// Shares normally for `seconds` once connected (so moving the cursor
+/// across measures input too), then prints the report.
+pub async fn probe_latency(seconds: u64) -> anyhow::Result<()> {
+    let setup = prepare_run()?;
+    let this = format!(
+        "\"{}\" ({}), MacWin {}",
+        device_name(),
+        os_name(setup.os),
+        env!("CARGO_PKG_VERSION")
+    );
+    println!(
+        "measuring the link to \"{}\" for {seconds} s once connected; move the cursor to the \
+         other computer and back to measure input too",
+        setup.peer.name
+    );
+    println!("emergency release: {EMERGENCY_CHORD}. Ctrl+C here stops early.");
+    let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+    let (connected_tx, mut connected_rx) = tokio::sync::watch::channel(false);
+    let ctrl_c_stop = stop_tx.clone();
+    tokio::spawn(async move {
+        let _ = tokio::signal::ctrl_c().await;
+        let _ = ctrl_c_stop.send(true);
+    });
+    tokio::spawn(async move {
+        // The guard `wait_for` returns must not live across the sleep.
+        let connected = matches!(
+            tokio::time::timeout(PROBE_CONNECT_WAIT, connected_rx.wait_for(|c| *c)).await,
+            Ok(Ok(_))
+        );
+        if connected {
+            tokio::time::sleep(Duration::from_secs(seconds)).await;
+        } else {
+            println!("not connected within {} s", PROBE_CONNECT_WAIT.as_secs());
+        }
+        let _ = stop_tx.send(true);
+    });
+    let measured = Arc::new(Mutex::new(Measured::default()));
+    let (dir, peer_fp, peer_os) = (
+        setup.config_dir.clone(),
+        setup.peer.fingerprint,
+        setup.peer.os,
+    );
+    let m = measured.clone();
+    let on_event = move |e: RunEvent| {
+        let mut st = m.lock().unwrap_or_else(|e| e.into_inner());
+        match &e {
+            RunEvent::Stats(s) => {
+                st.peak_out = st.peak_out.max(s.mouse_out_per_sec);
+                st.peak_in = st.peak_in.max(s.mouse_in_per_sec);
+                st.stats = Some(*s);
+                return;
+            }
+            RunEvent::Connected {
+                name,
+                version,
+                remote,
+                ..
+            } if st.connected.is_none() => {
+                let other = format!(
+                    "\"{name}\" ({}), MacWin {version}, {remote}",
+                    os_name(peer_os)
+                );
+                st.connected = Some((Instant::now(), other));
+                let _ = connected_tx.send(true);
+            }
+            RunEvent::PeerFound(addr) => save_found_address(&dir, peer_fp, *addr),
+            _ => {}
+        }
+        drop(st);
+        print_event(e);
+    };
+    let with_clipboard = setup.opts.session.clipboard.is_some();
+    let exit = runner::run(
+        setup.opts,
+        setup.identity,
+        || platform::backends(with_clipboard),
+        on_event,
+        stop_rx,
+    )
+    .await?;
+    let st = measured.lock().unwrap_or_else(|e| e.into_inner());
+    let Some((since, other)) = &st.connected else {
+        bail!(
+            "not connected to \"{}\": nothing was measured",
+            setup.peer.name
+        );
+    };
+    let report = Report {
+        connected_for: since.elapsed().min(Duration::from_secs(seconds)),
+        this: &this,
+        other,
+        stats: st.stats.as_ref(),
+        peak_out_per_sec: st.peak_out,
+        peak_in_per_sec: st.peak_in,
+    };
+    println!("\n{report}");
+    if exit == RunExit::EmergencyStop {
+        println!("stopped by the emergency chord");
     }
     Ok(())
 }

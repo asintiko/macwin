@@ -60,6 +60,7 @@ async fn run(command: Command) -> anyhow::Result<()> {
             Ok(())
         }
         Command::Probe(Probe::Clipboard { watch }) => commands::probe_clipboard(watch).await,
+        Command::Probe(Probe::Latency { seconds }) => commands::probe_latency(seconds).await,
         Command::Spike(Spike::Net(args)) => commands::spike_net(args).await,
         Command::Spike(Spike::Capture(args)) => commands::spike_capture(args).await,
         Command::Spike(Spike::Inject(_)) => commands::spike_inject().await,

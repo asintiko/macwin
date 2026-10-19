@@ -395,3 +395,40 @@ async fn a_dialer_finds_its_peer_at_a_new_address() {
     mac.stop.send(true).unwrap();
     assert_eq!(mac.finish().await, RunExit::Stopped);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_session_reports_link_statistics_and_the_peer_version() {
+    let mac_id = Identity::generate().unwrap();
+    let pc_id = Identity::generate().unwrap();
+    let addr: SocketAddr = format!("127.0.0.1:{}", free_port()).parse().unwrap();
+    let mut pc = listening(addr, &pc_id, mac_id.fingerprint()).await;
+    let mut mac = start(
+        session(Os::MacOs, "mac", Side::Right),
+        Mode::Dial(addr.to_string()),
+        mac_id.clone(),
+        pc_id.fingerprint(),
+    );
+    let e = mac.expect("connected", connected).await;
+    assert!(
+        matches!(e, RunEvent::Connected { ref version, .. } if version == env!("CARGO_PKG_VERSION")),
+        "{e:?}"
+    );
+    let e = mac
+        .expect(
+            "link statistics",
+            |e| matches!(e, RunEvent::Stats(s) if s.ping.answered > 0),
+        )
+        .await;
+    let RunEvent::Stats(s) = e else {
+        unreachable!()
+    };
+    assert!(s.ping.rtt_p50.is_some() && s.ping.lost == 0, "{s:?}");
+    pc.expect("statistics on the listener too", |e| {
+        matches!(e, RunEvent::Stats(_))
+    })
+    .await;
+    mac.stop.send(true).unwrap();
+    pc.stop.send(true).unwrap();
+    assert_eq!(mac.finish().await, RunExit::Stopped);
+    assert_eq!(pc.finish().await, RunExit::Stopped);
+}

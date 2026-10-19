@@ -4,6 +4,7 @@
 //! call takes the current time or a measured duration.
 
 use std::collections::VecDeque;
+use std::fmt;
 use std::time::{Duration, Instant};
 
 use crate::msg::{Ping, Pong};
@@ -349,6 +350,80 @@ impl RateMeter {
     }
 }
 
+/// The text `macwin probe latency` prints, ready to paste into an issue.
+pub struct Report<'a> {
+    /// How long the measurement ran while connected.
+    pub connected_for: Duration,
+    /// This computer, e.g. `"MacBook" (macOS), MacWin 0.2.0`.
+    pub this: &'a str,
+    /// The other computer, e.g. `"pc" (Windows), MacWin 0.2.0, 192.168.1.20:47800`.
+    pub other: &'a str,
+    /// The last statistics; `None` if none arrived.
+    pub stats: Option<&'a SessionStats>,
+    /// Highest mouse datagram rates seen while measuring.
+    pub peak_out_per_sec: u32,
+    pub peak_in_per_sec: u32,
+}
+
+impl fmt::Display for Report<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(
+            f,
+            "MacWin latency report: {} s connected",
+            self.connected_for.as_secs()
+        )?;
+        writeln!(f, "this computer:  {}", self.this)?;
+        writeln!(f, "other computer: {}", self.other)?;
+        let Some(s) = self.stats else {
+            return writeln!(f, "no statistics: the connection did not last long enough");
+        };
+        let p = &s.ping;
+        writeln!(f, "link (datagram ping, last minute):")?;
+        writeln!(
+            f,
+            "  rtt p50 {}, p95 {}, max {}; jitter {}",
+            ms(p.rtt_p50),
+            ms(p.rtt_p95),
+            ms(p.rtt_max),
+            ms(p.jitter)
+        )?;
+        let loss = p
+            .loss_percent()
+            .map_or_else(|| "-".to_owned(), |l| format!("{l:.1} %"));
+        writeln!(
+            f,
+            "  loss {loss} ({} of {} pings)",
+            p.lost,
+            p.answered + p.lost
+        )?;
+        writeln!(
+            f,
+            "mouse datagrams: peak {}/s sent, {}/s applied; {} skipped of {}",
+            self.peak_out_per_sec,
+            self.peak_in_per_sec,
+            s.mouse_skipped,
+            s.mouse_applied + s.mouse_skipped
+        )?;
+        writeln!(f, "time MacWin adds (p50 / p95 / max, count):")?;
+        let a = &s.added;
+        for (name, st) in [
+            ("send (capture to link)      ", &a.send),
+            ("receive (datagram to inject)", &a.receive),
+            ("session loop lag            ", &a.loop_lag),
+        ] {
+            writeln!(
+                f,
+                "  {name} {} / {} / {} ({})",
+                ms(st.p50),
+                ms(st.p95),
+                ms(st.max),
+                st.count
+            )?;
+        }
+        Ok(())
+    }
+}
+
 /// The statistics on one line, for the log.
 pub fn summary_line(s: &SessionStats) -> String {
     let p = &s.ping;
@@ -647,6 +722,70 @@ mod tests {
             "rtt p50 2.0 ms p95 5.0 ms max 9.0 ms, jitter 0.70 ms, loss 0.8 % of 240; \
              mouse 125/s out 0/s in, 0 skipped of 0; \
              added p95: send 0.08 ms receive - loop -"
+        );
+    }
+
+    #[test]
+    fn the_report_lists_link_mouse_and_added_time() {
+        let stats = SessionStats {
+            ping: PingStats {
+                rtt_p50: Some(2 * MS),
+                rtt_p95: Some(4 * MS),
+                rtt_max: Some(11 * MS),
+                jitter: Some(Duration::from_micros(620)),
+                answered: 120,
+                lost: 0,
+            },
+            mouse_out_per_sec: 0,
+            mouse_in_per_sec: 0,
+            mouse_applied: 0,
+            mouse_skipped: 0,
+            added: AddedLatency {
+                send: StageStats {
+                    count: 1530,
+                    p50: Some(Duration::from_micros(40)),
+                    p95: Some(Duration::from_micros(100)),
+                    max: Some(Duration::from_micros(350)),
+                },
+                receive: StageStats::default(),
+                loop_lag: StageStats {
+                    count: 600,
+                    p50: Some(Duration::from_micros(200)),
+                    p95: Some(Duration::from_micros(1100)),
+                    max: Some(3 * MS),
+                },
+            },
+        };
+        let report = Report {
+            connected_for: Duration::from_millis(30_400),
+            this: "\"MacBook\" (macOS), MacWin 0.2.0",
+            other: "\"pc\" (Windows), MacWin 0.2.0, 192.168.1.20:47800",
+            stats: Some(&stats),
+            peak_out_per_sec: 125,
+            peak_in_per_sec: 0,
+        };
+        assert_eq!(
+            report.to_string(),
+            "MacWin latency report: 30 s connected\n\
+             this computer:  \"MacBook\" (macOS), MacWin 0.2.0\n\
+             other computer: \"pc\" (Windows), MacWin 0.2.0, 192.168.1.20:47800\n\
+             link (datagram ping, last minute):\n\
+             \x20 rtt p50 2.0 ms, p95 4.0 ms, max 11.0 ms; jitter 0.62 ms\n\
+             \x20 loss 0.0 % (0 of 120 pings)\n\
+             mouse datagrams: peak 125/s sent, 0/s applied; 0 skipped of 0\n\
+             time MacWin adds (p50 / p95 / max, count):\n\
+             \x20 send (capture to link)       0.04 ms / 0.10 ms / 0.35 ms (1530)\n\
+             \x20 receive (datagram to inject) - / - / - (0)\n\
+             \x20 session loop lag             0.20 ms / 1.1 ms / 3.0 ms (600)\n"
+        );
+        let empty = Report {
+            stats: None,
+            ..report
+        };
+        assert!(
+            empty
+                .to_string()
+                .ends_with("no statistics: the connection did not last long enough\n")
         );
     }
 

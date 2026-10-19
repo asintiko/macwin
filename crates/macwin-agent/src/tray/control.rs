@@ -850,6 +850,7 @@ impl Controller {
                 save_found_address(&self.env.config_dir, peer, addr);
                 return;
             }
+            RunEvent::Stats(_) => return,
         };
         self.set_phase(phase);
     }
