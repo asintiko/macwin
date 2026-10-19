@@ -2,7 +2,10 @@
 //! shows and the commands it sends back.
 
 use macwin_core::arrange::{Placement, RectF};
+use macwin_core::latency::{Report, SessionStats};
 use macwin_core::types::Os;
+
+use crate::i18n::Tr;
 
 /// Interface language.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -185,6 +188,16 @@ pub struct UiState {
     pub notice: Option<Notice>,
     /// The app version.
     pub app_version: String,
+    /// The current session's statistics; `None` while not connected.
+    pub diagnostics: Option<Diagnostics>,
+}
+
+/// What the Diagnostics tab shows.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Diagnostics {
+    pub stats: SessionStats,
+    /// The peer's MacWin version, from its Hello.
+    pub peer_version: String,
 }
 
 /// What the window asks the application to do. Sent through
@@ -225,6 +238,8 @@ pub enum UiCommand {
     Unpair,
     /// Open the system settings page of a permission.
     OpenPermissionSettings(Permission),
+    /// Put text on this computer's clipboard (the diagnostics report).
+    CopyText(String),
     /// Dismiss the notice with this id.
     DismissNotice(u64),
     /// Quit the app.
@@ -247,6 +262,32 @@ pub trait Backend: Send + Sync + 'static {
 }
 
 impl UiState {
+    /// The report "Copy report" puts on the clipboard (English, like
+    /// `macwin probe latency`); `None` while not connected.
+    pub fn diagnostics_report(&self) -> Option<String> {
+        let d = self.diagnostics.as_ref()?;
+        let os = |o| Tr(Lang::En).os_name(o);
+        let this = format!(
+            "\"{}\" ({}), MacWin {}",
+            self.device_name,
+            os(self.this_os),
+            self.app_version
+        );
+        let other = self.peer.as_ref().map_or_else(String::new, |p| {
+            format!("\"{}\" ({}), MacWin {}", p.name, os(p.os), d.peer_version)
+        });
+        let report = Report {
+            connected_for: None,
+            this: &this,
+            other: &other,
+            stats: Some(&d.stats),
+            out_per_sec: d.stats.mouse_out_per_sec,
+            in_per_sec: d.stats.mouse_in_per_sec,
+            peak: false,
+        };
+        Some(report.to_string())
+    }
+
     /// True when a peer is paired and the connection state says so.
     pub fn is_paired(&self) -> bool {
         self.peer.is_some()
@@ -291,6 +332,7 @@ pub(crate) mod fixtures {
             permissions: None,
             notice: None,
             app_version: "0.1.0".into(),
+            diagnostics: None,
         }
     }
 
@@ -327,6 +369,26 @@ pub(crate) mod fixtures {
 mod tests {
     use super::fixtures::desk_state;
     use super::*;
+
+    #[test]
+    fn the_copied_report_names_both_computers() {
+        let mut st = desk_state();
+        assert_eq!(st.diagnostics_report(), None);
+        st.diagnostics = Some(Diagnostics {
+            stats: SessionStats {
+                mouse_out_per_sec: 120,
+                ..SessionStats::default()
+            },
+            peer_version: "0.3.0".into(),
+        });
+        let text = st.diagnostics_report().unwrap();
+        assert!(text.starts_with(
+            "MacWin latency report\n\
+             this computer:  \"MacBook Pro\" (macOS), MacWin 0.1.0\n\
+             other computer: \"Dmitriy-PC\" (Windows), MacWin 0.3.0\n"
+        ));
+        assert!(text.contains("mouse datagrams: 120/s sent"), "{text}");
+    }
 
     #[test]
     fn paired_needs_a_peer_and_a_settled_status() {

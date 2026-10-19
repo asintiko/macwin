@@ -27,8 +27,9 @@ mod wizard;
 
 pub use app::{RunOptions, WindowControl, run};
 pub use macwin_core::arrange::{Edge, Placement, RectF};
+pub use macwin_core::latency::SessionStats;
 pub use macwin_core::types::Os;
 pub use model::{
-    Activity, Backend, Lang, Notice, PeerView, Permission, Permissions, Role, ScreenView, Settings,
-    Status, UiCommand, UiState,
+    Activity, Backend, Diagnostics, Lang, Notice, PeerView, Permission, Permissions, Role,
+    ScreenView, Settings, Status, UiCommand, UiState,
 };

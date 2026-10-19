@@ -531,12 +531,13 @@ pub async fn probe_latency(seconds: u64) -> anyhow::Result<()> {
         );
     };
     let report = Report {
-        connected_for: since.elapsed().min(Duration::from_secs(seconds)),
+        connected_for: Some(since.elapsed().min(Duration::from_secs(seconds))),
         this: &this,
         other,
         stats: st.stats.as_ref(),
-        peak_out_per_sec: st.peak_out,
-        peak_in_per_sec: st.peak_in,
+        out_per_sec: st.peak_out,
+        in_per_sec: st.peak_in,
+        peak: true,
     };
     println!("\n{report}");
     if exit == RunExit::EmergencyStop {
@@ -644,6 +645,7 @@ fn run_tray_app(background: bool) -> anyhow::Result<()> {
         name,
         Box::new(platform::display_names),
         Box::new(platform::open_permission_settings),
+        Box::new(platform::copy_text),
     ));
     // On macOS this ends the process once the controller has finished.
     platform::run_window(app.clone(), backend, background);

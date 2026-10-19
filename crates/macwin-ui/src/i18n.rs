@@ -584,9 +584,97 @@ impl Tr {
     }
     pub fn shortcuts_hint(self, cmd: &str) -> String {
         match self.0 {
-            Lang::Ru => format!("Вкладки: {cmd}+1 … {cmd}+4"),
-            Lang::En => format!("Tabs: {cmd}+1 … {cmd}+4"),
+            Lang::Ru => format!("Вкладки: {cmd}+1 … {cmd}+5"),
+            Lang::En => format!("Tabs: {cmd}+1 … {cmd}+5"),
         }
+    }
+
+    // ---- diagnostics tab --------------------------------------------
+
+    pub fn tab_diagnostics(self) -> &'static str {
+        self.p("Диагностика", "Diagnostics")
+    }
+    pub fn diag_waiting(self) -> &'static str {
+        self.p(
+            "Цифры появятся, когда компьютеры подключатся друг к другу.",
+            "The numbers appear once the computers are connected.",
+        )
+    }
+    pub fn diag_link(self) -> &'static str {
+        self.p("Связь", "Link")
+    }
+    pub fn diag_link_desc(self) -> &'static str {
+        self.p(
+            "Пинг до второго компьютера 4 раза в секунду, за последнюю минуту.",
+            "A ping to the other computer 4 times a second, over the last minute.",
+        )
+    }
+    pub fn diag_rtt(self) -> &'static str {
+        self.p("Задержка туда и обратно", "Round trip")
+    }
+    pub fn diag_jitter(self) -> &'static str {
+        self.p("Разброс (джиттер)", "Jitter")
+    }
+    pub fn diag_loss(self) -> &'static str {
+        self.p("Потери", "Loss")
+    }
+    pub fn diag_lost_of(self, lost: u64, total: u64) -> String {
+        match self.0 {
+            Lang::Ru => format!("{lost} из {total}"),
+            Lang::En => format!("{lost} of {total}"),
+        }
+    }
+    pub fn diag_mouse(self) -> &'static str {
+        self.p("Мышь", "Mouse")
+    }
+    pub fn diag_sent(self) -> &'static str {
+        self.p("Отправлено движений", "Moves sent")
+    }
+    pub fn diag_applied(self) -> &'static str {
+        self.p("Принято движений", "Moves applied")
+    }
+    pub fn diag_per_sec(self, n: u32) -> String {
+        match self.0 {
+            Lang::Ru => format!("{n} в секунду"),
+            Lang::En => format!("{n} per second"),
+        }
+    }
+    pub fn diag_skipped(self) -> &'static str {
+        self.p(
+            "Пропущено (потеряны или опоздали)",
+            "Skipped (lost or late)",
+        )
+    }
+    pub fn diag_added(self) -> &'static str {
+        self.p("Задержка самого MacWin", "Time MacWin adds")
+    }
+    pub fn diag_added_desc(self) -> &'static str {
+        self.p(
+            "Медиана / 95 % / максимум за 1–2 минуты.",
+            "Median / 95 % / maximum over 1–2 minutes.",
+        )
+    }
+    pub fn diag_send(self) -> &'static str {
+        self.p("Отправка (захват → сеть)", "Send (capture → network)")
+    }
+    pub fn diag_receive(self) -> &'static str {
+        self.p("Приём (сеть → курсор)", "Receive (network → cursor)")
+    }
+    pub fn diag_loop(self) -> &'static str {
+        self.p("Опоздание цикла сеанса", "Session loop lag")
+    }
+    pub fn diag_versions(self, peer: &str, version: &str) -> String {
+        let peer = self.quoted(peer);
+        match self.0 {
+            Lang::Ru => format!("MacWin на {peer}: {version}"),
+            Lang::En => format!("MacWin on {peer}: {version}"),
+        }
+    }
+    pub fn diag_copy(self) -> &'static str {
+        self.p("Скопировать отчёт", "Copy report")
+    }
+    pub fn diag_copied(self) -> &'static str {
+        self.p("Отчёт скопирован", "Report copied")
     }
 }
 
@@ -603,6 +691,9 @@ mod tests {
             (ru.code_validity(), en.code_validity()),
             (ru.clipboard_limits(), en.clipboard_limits()),
             (ru.emergency_keys(), en.emergency_keys()),
+            (ru.tab_diagnostics(), en.tab_diagnostics()),
+            (ru.diag_waiting(), en.diag_waiting()),
+            (ru.diag_added(), en.diag_added()),
         ];
         for (r, e) in pairs {
             assert!(!r.is_empty() && !e.is_empty());

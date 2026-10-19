@@ -301,6 +301,18 @@ async fn pairing_here_then_sharing_settings_pause_and_quit() {
         .await;
     tray.wait("connected", connected).await;
 
+    // The window gets the session statistics and the PC's version.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while tray.shared.stats().is_none_or(|s| s.ping.answered == 0) {
+        assert!(std::time::Instant::now() < deadline, "no statistics");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(tray.shared.stats_version() > 0);
+    assert_eq!(
+        tray.shared.state().peer_version.as_deref(),
+        Some(env!("CARGO_PKG_VERSION"))
+    );
+
     // A setting restarts the session with it.
     tray.shared.clicked(ID_CLIPBOARD);
     tray.wait("clipboard on", |s| s.clipboard).await;
@@ -328,6 +340,7 @@ async fn pairing_here_then_sharing_settings_pause_and_quit() {
     // Pause stops sharing until resumed.
     tray.shared.clicked(ID_PAUSE);
     tray.wait("paused", |s| s.phase == Phase::Paused).await;
+    assert_eq!(tray.shared.stats(), None, "no statistics while paused");
     pc.expect("the tray left", |e| matches!(e, RunEvent::Ended(_)))
         .await;
     tokio::time::sleep(Duration::from_millis(300)).await;

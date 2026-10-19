@@ -8,8 +8,8 @@ use std::sync::Arc;
 use macwin_core::types::{Os, RoleKind};
 use macwin_platform::tray::TrayApp;
 use macwin_ui::{
-    Activity, Backend, Lang, Notice, PeerView, Permissions, Role, ScreenView, Settings, Status,
-    UiCommand, UiState,
+    Activity, Backend, Diagnostics, Lang, Notice, PeerView, Permissions, Role, ScreenView,
+    Settings, Status, UiCommand, UiState,
 };
 
 use crate::config::{Language, Role as ConfigRole};
@@ -19,6 +19,8 @@ use crate::tray::{Phase, ScreenDesc, TrayShared, TrayState};
 pub type DisplayNames = Box<dyn Fn() -> HashMap<u32, String> + Send + Sync>;
 /// Opens the System Settings page of a permission.
 pub type OpenSettings = Box<dyn Fn(macwin_ui::Permission) + Send + Sync>;
+/// Puts text on the clipboard.
+pub type CopyText = Box<dyn Fn(String) + Send + Sync>;
 
 /// The controller as the window sees it.
 pub struct WindowBackend {
@@ -27,6 +29,7 @@ pub struct WindowBackend {
     device_name: String,
     names: DisplayNames,
     open_settings: OpenSettings,
+    copy_text: CopyText,
 }
 
 impl WindowBackend {
@@ -36,6 +39,7 @@ impl WindowBackend {
         device_name: String,
         names: DisplayNames,
         open_settings: OpenSettings,
+        copy_text: CopyText,
     ) -> WindowBackend {
         WindowBackend {
             shared,
@@ -43,27 +47,31 @@ impl WindowBackend {
             device_name,
             names,
             open_settings,
+            copy_text,
         }
     }
 }
 
 impl Backend for WindowBackend {
     fn version(&self) -> u64 {
-        self.shared.version()
+        // Both only grow, so the sum changes whenever either does.
+        self.shared.version() + self.shared.stats_version()
     }
 
     fn state(&self) -> UiState {
-        ui_state(
-            &self.shared.state(),
-            self.this_os,
-            &self.device_name,
-            &(self.names)(),
-        )
+        let s = self.shared.state();
+        let mut ui = ui_state(&s, self.this_os, &self.device_name, &(self.names)());
+        ui.diagnostics = self.shared.stats().map(|stats| Diagnostics {
+            stats,
+            peer_version: s.peer_version.clone().unwrap_or_default(),
+        });
+        ui
     }
 
     fn send(&self, cmd: UiCommand) {
         match cmd {
             UiCommand::OpenPermissionSettings(p) => (self.open_settings)(p),
+            UiCommand::CopyText(text) => (self.copy_text)(text),
             cmd => self.shared.send_window(cmd),
         }
     }
@@ -160,6 +168,7 @@ pub fn ui_state(
             error: s.notice_error,
         }),
         app_version: env!("CARGO_PKG_VERSION").into(),
+        diagnostics: None,
     }
 }
 
@@ -254,6 +263,7 @@ mod tests {
                 accessibility: true,
                 input_monitoring: false,
             }),
+            peer_version: Some("0.3.0".into()),
         };
         let names = HashMap::from([(1, "Built-in Retina Display".to_string())]);
         let ui = ui_state(&s, Os::MacOs, "MacBook", &names);

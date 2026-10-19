@@ -17,6 +17,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use macwin_core::arrange::{self, Placement, RectF};
 use macwin_core::geometry::ScreenSet;
+use macwin_core::latency::SessionStats;
 use macwin_core::types::{Os, RoleKind, ScreenInfo, Side};
 use macwin_net::pairing::PairingCode;
 use macwin_platform::tray::{
@@ -144,6 +145,8 @@ pub struct TrayState {
     pub peer_screens: Vec<ScreenDesc>,
     /// `None` where the OS asks for no permissions.
     pub permissions: Option<PermissionState>,
+    /// The peer's MacWin version, from its last Hello.
+    pub peer_version: Option<String>,
 }
 
 impl Default for TrayState {
@@ -162,6 +165,7 @@ impl Default for TrayState {
             local_screens: Vec::new(),
             peer_screens: Vec::new(),
             permissions: None,
+            peer_version: None,
         }
     }
 }
@@ -395,6 +399,10 @@ type Callback = Box<dyn Fn() + Send + Sync>;
 /// the command channel.
 pub struct TrayShared {
     published: Mutex<(u64, TrayState)>,
+    /// The session statistics with their own version: they change four
+    /// times a second, which only the window shows (the tray menu does not
+    /// redraw for them).
+    stats: Mutex<(u64, Option<SessionStats>)>,
     commands: mpsc::UnboundedSender<UiCommand>,
     finished: AtomicBool,
     /// The app window is up: the tray shows the window-mode menu.
@@ -409,6 +417,7 @@ impl TrayShared {
     fn new(commands: mpsc::UnboundedSender<UiCommand>, window: bool) -> TrayShared {
         TrayShared {
             published: Mutex::new((0, TrayState::default())),
+            stats: Mutex::new((0, None)),
             commands,
             finished: AtomicBool::new(false),
             window: AtomicBool::new(window),
@@ -424,6 +433,30 @@ impl TrayShared {
     /// The current state.
     pub fn state(&self) -> TrayState {
         self.lock().1.clone()
+    }
+
+    /// The current session's statistics; `None` while not connected.
+    pub fn stats(&self) -> Option<SessionStats> {
+        self.stats.lock().unwrap_or_else(|e| e.into_inner()).1
+    }
+
+    /// Changes whenever [`TrayShared::stats`] does.
+    pub fn stats_version(&self) -> u64 {
+        self.stats.lock().unwrap_or_else(|e| e.into_inner()).0
+    }
+
+    fn set_stats(&self, stats: Option<SessionStats>) {
+        let changed = {
+            let mut s = self.stats.lock().unwrap_or_else(|e| e.into_inner());
+            let changed = s.1 != stats;
+            if changed {
+                *s = (s.0 + 1, stats);
+            }
+            changed
+        };
+        if changed {
+            self.wake();
+        }
     }
 
     /// Asks the controller to stop sharing and finish (Ctrl+C, logout).

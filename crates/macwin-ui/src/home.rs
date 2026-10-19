@@ -7,6 +7,7 @@ use eframe::egui::{
     pos2, vec2,
 };
 use macwin_core::arrange::{Edge, Placement};
+use macwin_core::latency::{StageStats, ms};
 
 use crate::app::{Cx, Local, Tab, notice};
 use crate::editor::{self, Params};
@@ -86,7 +87,7 @@ fn paused(status: &Status) -> bool {
     matches!(status, Status::Paused | Status::EmergencyPaused)
 }
 
-/// The tab selected by Cmd/Ctrl + 1..4.
+/// The tab selected by Cmd/Ctrl + 1..5.
 fn shortcut_tab(i: &egui::InputState) -> Option<Tab> {
     if !i.modifiers.command {
         return None;
@@ -95,7 +96,8 @@ fn shortcut_tab(i: &egui::InputState) -> Option<Tab> {
         (Key::Num1, Tab::Arrangement),
         (Key::Num2, Tab::Clipboard),
         (Key::Num3, Tab::Settings),
-        (Key::Num4, Tab::About),
+        (Key::Num4, Tab::Diagnostics),
+        (Key::Num5, Tab::About),
     ]
     .into_iter()
     .find(|(k, _)| i.key_pressed(*k))
@@ -132,6 +134,7 @@ pub(crate) fn show(ui: &mut Ui, cx: &mut Cx<'_>, l: &mut Local) {
             Tab::Arrangement => arrangement_tab(ui, cx, l),
             Tab::Clipboard => scroll(ui, |ui| clipboard_tab(ui, cx)),
             Tab::Settings => scroll(ui, |ui| settings_tab(ui, cx, l)),
+            Tab::Diagnostics => scroll(ui, |ui| diagnostics_tab(ui, cx, l)),
             Tab::About => scroll(ui, |ui| about_tab(ui, cx, l)),
         });
     unpair_dialog(ui, cx, l);
@@ -157,6 +160,7 @@ fn header(ui: &mut Ui, cx: &mut Cx<'_>, l: &mut Local) {
             (Tab::Arrangement, tr.tab_arrangement()),
             (Tab::Clipboard, tr.tab_clipboard()),
             (Tab::Settings, tr.tab_settings()),
+            (Tab::Diagnostics, tr.tab_diagnostics()),
             (Tab::About, tr.tab_about()),
         ];
         tab_bar(ui, &pal, &items, &mut l.tab);
@@ -579,6 +583,100 @@ fn unpair_dialog(ui: &mut Ui, cx: &mut Cx<'_>, l: &mut Local) {
 }
 
 // ---- about -------------------------------------------------------------
+
+// ---- diagnostics tab ---------------------------------------------------
+
+/// How long "Report copied" stays.
+const COPIED_FOR: Duration = Duration::from_secs(2);
+
+fn diagnostics_tab(ui: &mut Ui, cx: &mut Cx<'_>, l: &mut Local) {
+    let (pal, tr) = (cx.pal, cx.tr);
+    ui.add_space(4.0);
+    let Some(d) = cx.st.diagnostics.clone() else {
+        card(ui, &pal, |ui| {
+            ui.label(RichText::new(tr.diag_waiting()).size(14.5).color(pal.muted));
+        });
+        return;
+    };
+    let (s, p) = (d.stats, d.stats.ping);
+    card(ui, &pal, |ui| {
+        section_title(ui, &pal, tr.diag_link(), Some(tr.diag_link_desc()));
+        let rtt = format!("{} / {} / {}", ms(p.rtt_p50), ms(p.rtt_p95), ms(p.rtt_max));
+        stat_row(ui, &pal, tr.diag_rtt(), &rtt);
+        stat_row(ui, &pal, tr.diag_jitter(), &ms(p.jitter));
+        let lost = tr.diag_lost_of(u64::from(p.lost), u64::from(p.answered + p.lost));
+        let loss = p
+            .loss_percent()
+            .map_or_else(|| "-".to_owned(), |v| format!("{v:.1} % ({lost})"));
+        stat_row(ui, &pal, tr.diag_loss(), &loss);
+    });
+    ui.add_space(14.0);
+    card(ui, &pal, |ui| {
+        section_title(ui, &pal, tr.diag_mouse(), None);
+        stat_row(
+            ui,
+            &pal,
+            tr.diag_sent(),
+            &tr.diag_per_sec(s.mouse_out_per_sec),
+        );
+        stat_row(
+            ui,
+            &pal,
+            tr.diag_applied(),
+            &tr.diag_per_sec(s.mouse_in_per_sec),
+        );
+        let skipped = tr.diag_lost_of(s.mouse_skipped, s.mouse_applied + s.mouse_skipped);
+        stat_row(ui, &pal, tr.diag_skipped(), &skipped);
+    });
+    ui.add_space(14.0);
+    card(ui, &pal, |ui| {
+        section_title(ui, &pal, tr.diag_added(), Some(tr.diag_added_desc()));
+        let stage = |st: StageStats| format!("{} / {} / {}", ms(st.p50), ms(st.p95), ms(st.max));
+        stat_row(ui, &pal, tr.diag_send(), &stage(s.added.send));
+        stat_row(ui, &pal, tr.diag_receive(), &stage(s.added.receive));
+        stat_row(ui, &pal, tr.diag_loop(), &stage(s.added.loop_lag));
+    });
+    ui.add_space(14.0);
+    ui.horizontal(|ui| {
+        if button(ui, &pal, tr.diag_copy(), Btn::Secondary).clicked()
+            && let Some(text) = cx.st.diagnostics_report()
+        {
+            // The app writes it: egui's own clipboard support is not built in.
+            cx.send(UiCommand::CopyText(text));
+            l.copied = Some(Instant::now());
+        }
+        ui.add_space(8.0);
+        if l.copied.is_some_and(|t| t.elapsed() < COPIED_FOR) {
+            ui.label(RichText::new(tr.diag_copied()).size(14.0).color(pal.muted));
+            ui.ctx().request_repaint_after(COPIED_FOR);
+        } else if let Some(peer) = &cx.st.peer {
+            ui.label(
+                RichText::new(tr.diag_versions(&peer.name, &d.peer_version))
+                    .size(13.5)
+                    .color(pal.muted),
+            );
+        }
+    });
+}
+
+fn section_title(ui: &mut Ui, pal: &Palette, title: &str, desc: Option<&str>) {
+    ui.label(RichText::new(title).size(15.5).color(pal.text));
+    if let Some(desc) = desc {
+        ui.add_space(2.0);
+        ui.label(RichText::new(desc).size(13.0).color(pal.muted));
+    }
+    ui.add_space(8.0);
+}
+
+/// A name on the left, its value on the right.
+fn stat_row(ui: &mut Ui, pal: &Palette, name: &str, value: &str) {
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(name).size(14.5).color(pal.text));
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui.label(RichText::new(value).size(14.5).monospace().color(pal.text));
+        });
+    });
+}
 
 fn about_tab(ui: &mut Ui, cx: &mut Cx<'_>, l: &mut Local) {
     let (pal, tr) = (cx.pal, cx.tr);

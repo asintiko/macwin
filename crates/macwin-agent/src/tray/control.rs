@@ -468,6 +468,7 @@ impl Controller {
                 r.task.abort();
             }
         }
+        self.shared.set_stats(None);
     }
 
     fn cancel_pairing(&mut self) {
@@ -686,7 +687,8 @@ impl Controller {
             W::SetLanguage(lang) => self.save_setting(|c| c.language = language_of(lang)),
             W::Unpair => self.unpair().await,
             // The window opens System Settings itself, on its own thread.
-            W::OpenPermissionSettings(_) => {}
+            // The window backend handles these itself.
+            W::OpenPermissionSettings(_) | W::CopyText(_) => {}
             W::DismissNotice(id) => {
                 if self.state.notice.as_ref().is_some_and(|n| n.id == id) {
                     self.state.notice = None;
@@ -835,14 +837,24 @@ impl Controller {
             RunEvent::Listening(_) => Phase::Listening,
             RunEvent::Dialing(_) => Phase::Connecting,
             RunEvent::Connected {
-                screens, placement, ..
+                screens,
+                placement,
+                version,
+                ..
             } => {
                 self.peer_connected(&screens, placement);
+                self.state.peer_version = Some(version);
                 Phase::Connected(RoleKind::Idle)
             }
             RunEvent::Role(role) => Phase::Connected(role),
-            RunEvent::Ended(_) if dialing => Phase::Connecting,
-            RunEvent::Ended(_) => Phase::Listening,
+            RunEvent::Ended(_) => {
+                self.shared.set_stats(None);
+                if dialing {
+                    Phase::Connecting
+                } else {
+                    Phase::Listening
+                }
+            }
             RunEvent::Retrying { error, .. } if dialing => Phase::Retrying(error),
             // A stranger failed the handshake; still listening.
             RunEvent::Retrying { .. } => return,
@@ -850,7 +862,10 @@ impl Controller {
                 save_found_address(&self.env.config_dir, peer, addr);
                 return;
             }
-            RunEvent::Stats(_) => return,
+            RunEvent::Stats(s) => {
+                self.shared.set_stats(Some(s));
+                return;
+            }
         };
         self.set_phase(phase);
     }

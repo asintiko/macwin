@@ -350,28 +350,30 @@ impl RateMeter {
     }
 }
 
-/// The text `macwin probe latency` prints, ready to paste into an issue.
+/// The text `macwin probe latency` prints (and the Diagnostics tab copies),
+/// ready to paste into an issue.
 pub struct Report<'a> {
-    /// How long the measurement ran while connected.
-    pub connected_for: Duration,
+    /// How long the measurement ran while connected, if it was timed.
+    pub connected_for: Option<Duration>,
     /// This computer, e.g. `"MacBook" (macOS), MacWin 0.2.0`.
     pub this: &'a str,
     /// The other computer, e.g. `"pc" (Windows), MacWin 0.2.0, 192.168.1.20:47800`.
     pub other: &'a str,
     /// The last statistics; `None` if none arrived.
     pub stats: Option<&'a SessionStats>,
-    /// Highest mouse datagram rates seen while measuring.
-    pub peak_out_per_sec: u32,
-    pub peak_in_per_sec: u32,
+    /// Mouse datagram rates: the highest seen while measuring (`peak`) or
+    /// the current ones.
+    pub out_per_sec: u32,
+    pub in_per_sec: u32,
+    pub peak: bool,
 }
 
 impl fmt::Display for Report<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(
-            f,
-            "MacWin latency report: {} s connected",
-            self.connected_for.as_secs()
-        )?;
+        match self.connected_for {
+            Some(d) => writeln!(f, "MacWin latency report: {} s connected", d.as_secs())?,
+            None => writeln!(f, "MacWin latency report")?,
+        }
         writeln!(f, "this computer:  {}", self.this)?;
         writeln!(f, "other computer: {}", self.other)?;
         let Some(s) = self.stats else {
@@ -398,9 +400,10 @@ impl fmt::Display for Report<'_> {
         )?;
         writeln!(
             f,
-            "mouse datagrams: peak {}/s sent, {}/s applied; {} skipped of {}",
-            self.peak_out_per_sec,
-            self.peak_in_per_sec,
+            "mouse datagrams: {}{}/s sent, {}/s applied; {} skipped of {}",
+            if self.peak { "peak " } else { "" },
+            self.out_per_sec,
+            self.in_per_sec,
             s.mouse_skipped,
             s.mouse_applied + s.mouse_skipped
         )?;
@@ -757,12 +760,13 @@ mod tests {
             },
         };
         let report = Report {
-            connected_for: Duration::from_millis(30_400),
+            connected_for: Some(Duration::from_millis(30_400)),
             this: "\"MacBook\" (macOS), MacWin 0.2.0",
             other: "\"pc\" (Windows), MacWin 0.2.0, 192.168.1.20:47800",
             stats: Some(&stats),
-            peak_out_per_sec: 125,
-            peak_in_per_sec: 0,
+            out_per_sec: 125,
+            in_per_sec: 0,
+            peak: true,
         };
         assert_eq!(
             report.to_string(),
@@ -778,9 +782,20 @@ mod tests {
              \x20 receive (datagram to inject) - / - / - (0)\n\
              \x20 session loop lag             0.20 ms / 1.1 ms / 3.0 ms (600)\n"
         );
+        let live = Report {
+            connected_for: None,
+            peak: false,
+            ..report
+        };
+        let text = live.to_string();
+        assert!(text.starts_with("MacWin latency report\n"), "{text}");
+        assert!(
+            text.contains("mouse datagrams: 125/s sent, 0/s applied;"),
+            "{text}"
+        );
         let empty = Report {
             stats: None,
-            ..report
+            ..live
         };
         assert!(
             empty

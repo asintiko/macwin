@@ -4,7 +4,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use macwin_platform::{FileSecretStore, PlatformError, SecretStore};
-use tracing::debug;
+use tracing::{debug, warn};
 
 pub use imp::{
     alert, capture, clipboard, display_names, init, injector, open_permission_settings,
@@ -39,6 +39,14 @@ const ALL_GRANTED: crate::tray::PermissionState = crate::tray::PermissionState {
 };
 
 /// All backends a KVM session needs; the clipboard only when it is shared.
+/// Puts `text` on this computer's clipboard (the diagnostics report). The
+/// origin marker comes with it, so clipboard sharing leaves it here.
+pub fn copy_text(text: String) {
+    if let Err(e) = clipboard().write_text(&text) {
+        warn!(error = %e, "cannot put the text on the clipboard");
+    }
+}
+
 pub fn backends(with_clipboard: bool) -> Result<Backends, PlatformError> {
     Ok(Backends {
         capture: capture(),

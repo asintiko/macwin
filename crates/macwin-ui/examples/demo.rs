@@ -3,7 +3,7 @@
 //!
 //! ```text
 //! cargo run -p macwin-ui --example demo -- \
-//!     --scenario role|arrange|code|wait-code|connected|secondary|settings \
+//!     --scenario role|arrange|code|wait-code|connected|secondary|settings|diagnostics \
 //!     --lang ru|en --os mac|windows [--start-hidden] \
 //!     [--placement left|dell-right|macbook-right|dell-top] [--quit-after SECS] \
 //!     [--status listening|connecting|retrying|paused|emergency|failed|controlling|controlled]
@@ -20,8 +20,9 @@ use std::thread;
 use std::time::Duration;
 
 use macwin_ui::{
-    Activity, Backend, Edge, Lang, Notice, Os, PeerView, Permission, Permissions, Placement, RectF,
-    Role, RunOptions, ScreenView, Settings, Status, UiCommand, UiState,
+    Activity, Backend, Diagnostics, Edge, Lang, Notice, Os, PeerView, Permission, Permissions,
+    Placement, RectF, Role, RunOptions, ScreenView, SessionStats, Settings, Status, UiCommand,
+    UiState,
 };
 
 type Waker = Box<dyn Fn() + Send + Sync>;
@@ -151,6 +152,40 @@ fn named_status(name: &str) -> Option<Status> {
     })
 }
 
+/// Numbers like a MacBook on 5 GHz Wi-Fi controlling a PC.
+fn sample_diagnostics() -> Diagnostics {
+    use macwin_core::latency::{AddedLatency, PingStats, StageStats};
+    let us = Duration::from_micros;
+    let stage = |count, p50, p95, max| StageStats {
+        count,
+        p50: Some(us(p50)),
+        p95: Some(us(p95)),
+        max: Some(us(max)),
+    };
+    Diagnostics {
+        stats: SessionStats {
+            ping: PingStats {
+                rtt_p50: Some(us(3_100)),
+                rtt_p95: Some(us(8_700)),
+                rtt_max: Some(us(41_000)),
+                jitter: Some(us(1_400)),
+                answered: 239,
+                lost: 1,
+            },
+            mouse_out_per_sec: 125,
+            mouse_in_per_sec: 0,
+            mouse_applied: 0,
+            mouse_skipped: 0,
+            added: AddedLatency {
+                send: stage(9_840, 45, 120, 900),
+                receive: StageStats::default(),
+                loop_lag: stage(2_400, 180, 1_100, 4_000),
+            },
+        },
+        peer_version: env!("CARGO_PKG_VERSION").into(),
+    }
+}
+
 fn initial(scenario: &str, lang: Lang, os: Os, placement: Placement) -> UiState {
     let (device_name, local_screens) = match os {
         Os::MacOs => ("MacBook Pro", mac_desk()),
@@ -173,6 +208,7 @@ fn initial(scenario: &str, lang: Lang, os: Os, placement: Placement) -> UiState 
         }),
         notice: None,
         app_version: env!("CARGO_PKG_VERSION").into(),
+        diagnostics: None,
     };
     let pair = |st: &mut UiState, role: Role| {
         let (peer, screens) = peer_of(st.this_os);
@@ -198,6 +234,11 @@ fn initial(scenario: &str, lang: Lang, os: Os, placement: Placement) -> UiState 
             };
         }
         "connected" | "settings" => pair(&mut st, Role::Primary),
+        "diagnostics" => {
+            pair(&mut st, Role::Primary);
+            st.status = Status::Connected(Activity::Controlling);
+            st.diagnostics = Some(sample_diagnostics());
+        }
         "secondary" => pair(&mut st, Role::Secondary),
         _ => {}
     }
@@ -316,6 +357,7 @@ impl Backend for Demo {
                     }
                 }
             }),
+            UiCommand::CopyText(text) => println!("{text}"),
             UiCommand::DismissNotice(id) => s.update(|st| {
                 if st.notice.as_ref().is_some_and(|n| n.id == id) {
                     st.notice = None;

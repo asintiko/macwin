@@ -59,6 +59,7 @@ pub(crate) enum Tab {
     Arrangement,
     Clipboard,
     Settings,
+    Diagnostics,
     About,
 }
 
@@ -90,6 +91,8 @@ pub(crate) struct Local {
     pub confirm_unpair: bool,
     pub dismissed: Option<u64>,
     pub logo: Option<TextureHandle>,
+    /// When the diagnostics report was last copied.
+    pub copied: Option<Instant>,
 }
 
 pub(crate) struct MacWinApp {
@@ -145,6 +148,7 @@ impl MacWinApp {
                 confirm_unpair: false,
                 dismissed: None,
                 logo: icon::logo_texture(&ctx),
+                copied: None,
             },
             hide_on_close: options.hide_on_close,
             start_hidden: options.start_hidden,
