@@ -997,4 +997,12 @@ async fn both_sides_measure_the_link_and_count_mouse_datagrams() {
             .is_some_and(|s| s.mouse_out_per_sec >= 10)
     })
     .await;
+    // The time each side adds: forwarding on A, injecting on B, and the
+    // lateness of both session loops.
+    let a_added = a.handle.stats.borrow().unwrap().added;
+    let b_added = b.handle.stats.borrow().unwrap().added;
+    assert!(a_added.send.count >= 11, "{a_added:?}"); // crossing + 10 moves
+    assert!(a_added.send.p95.is_some_and(|d| d < Duration::from_secs(1)));
+    assert!(b_added.receive.count >= 10, "{b_added:?}");
+    assert!(a_added.loop_lag.count > 0 && b_added.loop_lag.count > 0);
 }

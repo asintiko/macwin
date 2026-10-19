@@ -9,13 +9,13 @@
 //! is always Core -> backend internals.
 
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use macwin_core::arrange::{Edge, Placement};
 use macwin_core::engine::{
     Action, CloseReason, Engine, EngineConfig, PeerInfo, Timings, TransportRole,
 };
-use macwin_core::latency::SessionStats;
+use macwin_core::latency::{SessionStats, StageTimes, summary_line};
 use macwin_core::msg::{
     CAP_CLIPBOARD_FILES, CAP_CLIPBOARD_IMAGE, CAP_CLIPBOARD_TEXT, CAP_INPUT_CAPTURE,
     CAP_INPUT_INJECT, CAP_WHEEL_PIXEL, Hello,
@@ -198,7 +198,22 @@ struct Core {
     link: LinkSender,
     role_tx: watch::Sender<RoleKind>,
     stats_tx: watch::Sender<Option<SessionStats>>,
+    /// Time this process adds, per stage.
+    stages: StageTimes,
     end: Option<SessionEnd>,
+}
+
+/// How often the statistics go to the log (at debug level).
+const STATS_LOG_INTERVAL: Duration = Duration::from_secs(60);
+
+fn forwards(actions: &[Action]) -> bool {
+    actions
+        .iter()
+        .any(|a| matches!(a, Action::SendDatagram(_) | Action::SendInput(_)))
+}
+
+fn injects(actions: &[Action]) -> bool {
+    actions.iter().any(|a| matches!(a, Action::Inject(_)))
 }
 
 fn lock(core: &Mutex<Core>) -> MutexGuard<'_, Core> {
@@ -326,13 +341,18 @@ struct Sink {
 
 impl CaptureSink for Sink {
     fn on_event(&self, ev: CapturedEvent) -> bool {
+        let start = Instant::now();
         let mut core = lock(&self.core);
         if core.end.is_some() {
             // The session is over: local input stays local.
             return true;
         }
         let out = core.engine.on_local_event(Instant::now(), ev);
+        let forwarded = forwards(&out.actions);
         core.dispatch(out.actions);
+        if forwarded {
+            core.stages.record_send(start.elapsed());
+        }
         if core.end.is_some() {
             self.wake.notify_one();
         }
@@ -406,6 +426,7 @@ pub fn spawn_session(
         link: tx.clone(),
         role_tx,
         stats_tx,
+        stages: StageTimes::default(),
         end: None,
     }));
     let wake = Arc::new(Notify::new());
@@ -466,6 +487,7 @@ async fn run(
     let mut files = Some(files);
     let mut tick = tokio::time::interval(timings.tick);
     tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let mut next_stats_log = Instant::now() + STATS_LOG_INTERVAL;
     let (mut sharing, mut local, mut transfers) = match sharing {
         Some((s, events)) => (Some(s), Some(events.local), Some(events.transfers)),
         None => (None, None, None),
@@ -507,7 +529,11 @@ async fn run(
                     }
                     Some(Inbound::Datagram(m)) => {
                         let a = c.engine.on_datagram(now, m);
+                        let injected = injects(&a);
                         c.dispatch(a);
+                        if injected {
+                            c.stages.record_receive(now.elapsed());
+                        }
                     }
                     Some(Inbound::Closed(reason)) => {
                         info!(?reason, "link closed");
@@ -522,16 +548,27 @@ async fn run(
                     }
                 }
             }
-            _ = tick.tick() => {
+            scheduled = tick.tick() => {
                 let mut c = lock(&core);
                 let now = Instant::now();
+                c.stages.record_loop_lag(now.saturating_duration_since(scheduled.into_std()));
                 let mut a = c.engine.on_tick(now);
                 let ping = c.engine.poll_ping(now);
                 let pinged = ping.is_some();
                 a.extend(ping);
                 c.dispatch(a);
                 if pinged {
-                    let stats = c.engine.stats(now);
+                    let stats = c.engine.stats(now).map(|mut s| {
+                        s.added = c.stages.summary();
+                        s
+                    });
+                    if now >= next_stats_log {
+                        next_stats_log = now + STATS_LOG_INTERVAL;
+                        if let Some(s) = &stats {
+                            debug!("link statistics: {}", summary_line(s));
+                        }
+                        c.stages.rotate();
+                    }
                     c.stats_tx.send_replace(stats);
                 }
             }

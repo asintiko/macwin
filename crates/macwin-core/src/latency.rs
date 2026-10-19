@@ -1,6 +1,7 @@
-//! Link quality statistics for the Diagnostics view and
-//! `macwin probe latency`: the datagram ping (RTT, jitter, loss) and mouse
-//! datagram rates. Pure: every call takes the current time.
+//! Link quality and timing statistics for the Diagnostics view and
+//! `macwin probe latency`: the datagram ping (RTT, jitter, loss), mouse
+//! datagram rates and histograms of the time MacWin itself adds. Pure: every
+//! call takes the current time or a measured duration.
 
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
@@ -139,6 +140,168 @@ pub struct SessionStats {
     /// Mouse datagrams of a control period that were never applied (lost on
     /// the way, or overtaken by a newer one).
     pub mouse_skipped: u64,
+    /// Measured by the driver, not the Engine.
+    pub added: AddedLatency,
+}
+
+/// Time MacWin itself adds, per stage (measured in the driver).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct AddedLatency {
+    /// A forwarded local event: from the capture callback to the message
+    /// handed to the link.
+    pub send: StageStats,
+    /// A peer mouse datagram: from the driver taking it to the injection done.
+    pub receive: StageStats,
+    /// How late the driver handled its tick: stalls of the session loop and
+    /// coarse OS timers.
+    pub loop_lag: StageStats,
+}
+
+/// p50 / p95 / max of one stage.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct StageStats {
+    pub count: u64,
+    pub p50: Option<Duration>,
+    pub p95: Option<Duration>,
+    pub max: Option<Duration>,
+}
+
+impl From<&Histogram> for StageStats {
+    fn from(h: &Histogram) -> StageStats {
+        StageStats {
+            count: h.count(),
+            p50: h.percentile(50.0),
+            p95: h.percentile(95.0),
+            max: h.max(),
+        }
+    }
+}
+
+/// Stage histograms over the current and the previous minute.
+#[derive(Debug, Clone, Default)]
+pub struct StageTimes {
+    current: [Histogram; 3],
+    previous: [Histogram; 3],
+}
+
+impl StageTimes {
+    const SEND: usize = 0;
+    const RECEIVE: usize = 1;
+    const LOOP_LAG: usize = 2;
+
+    pub fn record_send(&mut self, d: Duration) {
+        self.current[Self::SEND].record(d);
+    }
+
+    pub fn record_receive(&mut self, d: Duration) {
+        self.current[Self::RECEIVE].record(d);
+    }
+
+    pub fn record_loop_lag(&mut self, d: Duration) {
+        self.current[Self::LOOP_LAG].record(d);
+    }
+
+    /// Starts a new minute: the oldest one is dropped.
+    pub fn rotate(&mut self) {
+        self.previous = std::mem::take(&mut self.current);
+    }
+
+    /// The last one to two minutes.
+    pub fn summary(&self) -> AddedLatency {
+        let stage = |i: usize| {
+            let mut h = self.previous[i].clone();
+            h.merge(&self.current[i]);
+            StageStats::from(&h)
+        };
+        AddedLatency {
+            send: stage(Self::SEND),
+            receive: stage(Self::RECEIVE),
+            loop_lag: stage(Self::LOOP_LAG),
+        }
+    }
+}
+
+/// Histogram buckets per doubling: durations are kept to about 9 %.
+const STEPS_PER_OCTAVE: f64 = 8.0;
+/// 0 µs, then buckets up to 2^24 µs (about 17 s); longer goes in the last.
+const BUCKETS: usize = 1 + 24 * 8;
+
+/// A log-scale histogram of durations, cheap enough for every mouse event.
+#[derive(Debug, Clone)]
+pub struct Histogram {
+    counts: [u32; BUCKETS],
+    total: u64,
+    max_us: u64,
+}
+
+impl Default for Histogram {
+    fn default() -> Histogram {
+        Histogram {
+            counts: [0; BUCKETS],
+            total: 0,
+            max_us: 0,
+        }
+    }
+}
+
+impl Histogram {
+    /// Bucket `i > 0` holds [2^((i-1)/8), 2^(i/8)) µs.
+    fn bucket(us: u64) -> usize {
+        if us == 0 {
+            return 0;
+        }
+        (1 + ((us as f64).log2() * STEPS_PER_OCTAVE) as usize).min(BUCKETS - 1)
+    }
+
+    fn upper_us(i: usize) -> f64 {
+        if i == 0 {
+            0.0
+        } else {
+            (i as f64 / STEPS_PER_OCTAVE).exp2()
+        }
+    }
+
+    pub fn record(&mut self, d: Duration) {
+        let us = micros(d);
+        let i = Self::bucket(us);
+        self.counts[i] = self.counts[i].saturating_add(1);
+        self.total += 1;
+        self.max_us = self.max_us.max(us);
+    }
+
+    pub fn merge(&mut self, other: &Histogram) {
+        for (c, o) in self.counts.iter_mut().zip(other.counts.iter()) {
+            *c = c.saturating_add(*o);
+        }
+        self.total += other.total;
+        self.max_us = self.max_us.max(other.max_us);
+    }
+
+    pub fn count(&self) -> u64 {
+        self.total
+    }
+
+    pub fn max(&self) -> Option<Duration> {
+        (self.total > 0).then(|| Duration::from_micros(self.max_us))
+    }
+
+    /// The `p`-th percentile (0 to 100): the upper bound of its bucket, never
+    /// above the largest value recorded.
+    pub fn percentile(&self, p: f64) -> Option<Duration> {
+        if self.total == 0 {
+            return None;
+        }
+        let rank = ((p / 100.0) * self.total as f64).ceil().max(1.0) as u64;
+        let mut seen = 0u64;
+        for (i, &c) in self.counts.iter().enumerate() {
+            seen += u64::from(c);
+            if seen >= rank {
+                let us = Self::upper_us(i).min(self.max_us as f64);
+                return Some(Duration::from_micros(us.round() as u64));
+            }
+        }
+        self.max()
+    }
 }
 
 const SLOT: Duration = Duration::from_millis(100);
@@ -183,6 +346,46 @@ impl RateMeter {
             .take_while(|&s| s + SLOTS > now_slot)
             .map(|s| self.counts[(s % SLOTS) as usize])
             .fold(0u32, u32::saturating_add)
+    }
+}
+
+/// The statistics on one line, for the log.
+pub fn summary_line(s: &SessionStats) -> String {
+    let p = &s.ping;
+    let loss = p
+        .loss_percent()
+        .map_or_else(|| "-".to_owned(), |l| format!("{l:.1} %"));
+    format!(
+        "rtt p50 {} p95 {} max {}, jitter {}, loss {loss} of {}; \
+         mouse {}/s out {}/s in, {} skipped of {}; \
+         added p95: send {} receive {} loop {}",
+        ms(p.rtt_p50),
+        ms(p.rtt_p95),
+        ms(p.rtt_max),
+        ms(p.jitter),
+        p.answered + p.lost,
+        s.mouse_out_per_sec,
+        s.mouse_in_per_sec,
+        s.mouse_skipped,
+        s.mouse_applied + s.mouse_skipped,
+        ms(s.added.send.p95),
+        ms(s.added.receive.p95),
+        ms(s.added.loop_lag.p95),
+    )
+}
+
+/// "1.2 ms" (two decimals below a millisecond), "-" when unknown.
+pub fn ms(d: Option<Duration>) -> String {
+    match d {
+        None => "-".to_owned(),
+        Some(d) => {
+            let v = d.as_secs_f64() * 1000.0;
+            if v < 1.0 {
+                format!("{v:.2} ms")
+            } else {
+                format!("{v:.1} ms")
+            }
+        }
     }
 }
 
@@ -340,6 +543,111 @@ mod tests {
         assert_eq!(percentile(&v, 95.0), Some(Duration::from_micros(95)));
         assert_eq!(percentile(&v, 100.0), Some(Duration::from_micros(100)));
         assert_eq!(percentile(&v, 0.0), Some(Duration::from_micros(1)));
+    }
+
+    #[test]
+    fn histogram_percentiles_are_within_a_bucket() {
+        let mut h = Histogram::default();
+        assert_eq!((h.count(), h.percentile(50.0), h.max()), (0, None, None));
+        // 90 events of 1 ms, 10 of 20 ms.
+        for _ in 0..90 {
+            h.record(MS);
+        }
+        for _ in 0..10 {
+            h.record(20 * MS);
+        }
+        assert_eq!(h.count(), 100);
+        assert_eq!(h.max(), Some(20 * MS));
+        // Capped by the max: exact here.
+        assert_eq!(h.percentile(100.0), Some(20 * MS));
+        let p50 = h.percentile(50.0).unwrap();
+        assert!(p50 >= MS && p50 <= MS * 110 / 100, "{p50:?}");
+        let p95 = h.percentile(95.0).unwrap();
+        assert!(p95 >= 20 * MS * 90 / 100 && p95 <= 20 * MS, "{p95:?}");
+        // Zero and very long durations have buckets too.
+        h.record(Duration::ZERO);
+        h.record(Duration::from_secs(60));
+        assert_eq!(h.percentile(0.0), Some(Duration::ZERO));
+        assert_eq!(h.max(), Some(Duration::from_secs(60)));
+    }
+
+    #[test]
+    fn every_duration_lands_in_a_bucket_whose_bound_covers_it() {
+        for us in [
+            1u64, 2, 3, 7, 100, 999, 1000, 1024, 4999, 65_536, 16_000_000,
+        ] {
+            let i = Histogram::bucket(us);
+            let upper = Histogram::upper_us(i);
+            let lower = if i <= 1 {
+                0.0
+            } else {
+                Histogram::upper_us(i - 1)
+            };
+            assert!(
+                lower <= us as f64 && (us as f64) < upper * 1.000_001,
+                "{us} µs in [{lower}, {upper})"
+            );
+            assert!(
+                upper <= us as f64 * 1.1 + 1.0,
+                "{us} µs: bound {upper} too loose"
+            );
+        }
+    }
+
+    #[test]
+    fn stage_times_cover_the_current_and_the_previous_minute() {
+        let mut t = StageTimes::default();
+        assert_eq!(t.summary(), AddedLatency::default());
+        t.record_send(MS);
+        t.record_receive(2 * MS);
+        t.record_loop_lag(16 * MS);
+        t.rotate();
+        t.record_send(3 * MS);
+        let s = t.summary();
+        assert_eq!((s.send.count, s.send.max), (2, Some(3 * MS)));
+        assert_eq!((s.receive.count, s.receive.max), (1, Some(2 * MS)));
+        assert_eq!(s.loop_lag.max, Some(16 * MS));
+        // Two rotations later the first minute is gone.
+        t.rotate();
+        t.rotate();
+        assert_eq!(t.summary(), AddedLatency::default());
+    }
+
+    #[test]
+    fn the_summary_line_reads_like_the_report() {
+        assert_eq!(ms(None), "-");
+        assert_eq!(ms(Some(Duration::from_micros(250))), "0.25 ms");
+        assert_eq!(ms(Some(Duration::from_micros(12_345))), "12.3 ms");
+        let empty = summary_line(&SessionStats::default());
+        assert!(empty.starts_with("rtt p50 - p95 - max -, jitter -, loss - of 0;"));
+        let s = SessionStats {
+            ping: PingStats {
+                rtt_p50: Some(2 * MS),
+                rtt_p95: Some(5 * MS),
+                rtt_max: Some(9 * MS),
+                jitter: Some(Duration::from_micros(700)),
+                answered: 238,
+                lost: 2,
+            },
+            mouse_out_per_sec: 125,
+            mouse_in_per_sec: 0,
+            mouse_applied: 0,
+            mouse_skipped: 0,
+            added: AddedLatency {
+                send: StageStats {
+                    count: 10,
+                    p95: Some(Duration::from_micros(80)),
+                    ..StageStats::default()
+                },
+                ..AddedLatency::default()
+            },
+        };
+        assert_eq!(
+            summary_line(&s),
+            "rtt p50 2.0 ms p95 5.0 ms max 9.0 ms, jitter 0.70 ms, loss 0.8 % of 240; \
+             mouse 125/s out 0/s in, 0 skipped of 0; \
+             added p95: send 0.08 ms receive - loop -"
+        );
     }
 
     #[test]

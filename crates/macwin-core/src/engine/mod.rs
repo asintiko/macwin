@@ -384,6 +384,7 @@ impl Engine {
             mouse_in_per_sec: s.mouse_in.per_second(now),
             mouse_applied: s.mouse_applied,
             mouse_skipped: s.mouse_skipped,
+            added: Default::default(),
         })
     }
 
