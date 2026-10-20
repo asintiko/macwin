@@ -336,3 +336,27 @@ macOS найдена: «отвязка» курсора от мыши дейст
   Clippy (`x86_64-pc-windows-gnu`), форматирование и `git diff --check`.
 - Настоящие Windows hooks и курсор не проверены: остаются ручные сценарии
   start/concurrent start, Grab/Release/Rearm и stop во время захвата.
+
+### A.11 — clipboard при исчерпании stream credit
+
+- Вместо новой задачи на каждое обновление работает один clipboard writer
+  на link: не более одного отправляемого payload и одного ожидающего.
+  Новое обновление заменяет ожидающее; после освобождения uni-stream credit
+  отправляется последнее значение. Формат, приоритет и лимиты не изменены.
+- Закрытие link запрещает новые обновления, останавливает ожидание credit
+  и очищает pending-слот. Clipboard остаётся best-effort: pending и in-flight
+  данные могут быть потеряны при закрытии соединения.
+- Регрессионные loopback-тесты занимают все 16 uni-stream slots: из 64
+  ожидающих обновлений доставляется только последнее; link закрывается,
+  даже пока удерживающие credit файловые потоки остаются открытыми.
+  Unit-тест проверяет замену pending и запрет записи после остановки.
+- Тест доставки clipboard frames отправляет их последовательно: проверяет
+  каждый формат отдельно, не требуя сохранения уже заменённых обновлений.
+- На Linux прошли 29 unit и 21 loopback-тест `macwin-net`. Итоговый
+  `cargo test --workspace --all-features --locked`: 471 passed, 5 ignored
+  (CLI peers требуют macOS/Windows).
+  Прошли `cargo fmt --all --check`, строгий workspace Clippy всех
+  targets/features, `cargo run -p keymap-gen --locked -- --check`
+  и `git diff --check`.
+- Это loopback-проверка транспорта, а не системного clipboard и оборудования
+  Mac/Windows; нативные сценарии по-прежнему требуют ручного прогона.

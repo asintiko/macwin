@@ -1,15 +1,16 @@
 //! A transport-agnostic message link: what the driver talks to.
 //!
-//! The QUIC implementation runs one writer task per stream, one reader task
-//! per stream, one datagram reader, one acceptor of unidirectional streams
-//! and a supervisor. Every decode error on any channel closes the
-//! connection as a protocol violation. Exactly one [`Inbound::Closed`] is
-//! delivered per link, after every message that arrived before the close.
+//! The QUIC implementation runs separate control/input writers, a bounded
+//! clipboard writer, one reader task per stream, one datagram reader, one
+//! acceptor of unidirectional streams and a supervisor. Every decode error on
+//! any channel closes the connection as a protocol violation. Exactly one
+//! [`Inbound::Closed`] is delivered per link, after every message that arrived
+//! before the close.
 //!
 //! Clipboard updates travel on their own unidirectional streams (one per
-//! message, type byte [`STREAM_CLIPBOARD`], lowest priority), so a large
-//! text never delays heartbeats or input. They are best effort: an update
-//! still in flight when the link closes is lost.
+//! sent message, type byte [`STREAM_CLIPBOARD`]), so a large text never delays
+//! heartbeats or input. Updates waiting to be sent are coalesced to the
+//! newest; pending and in-flight updates are best effort on close.
 //!
 //! [`Link::memory_pair`] is an in-process implementation for tests.
 
@@ -34,7 +35,7 @@ use quinn::{
 };
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, DuplexStream, ReadBuf};
 use tokio::sync::mpsc::error::TrySendError;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{Notify, mpsc, watch};
 use tokio::task::{JoinHandle, JoinSet};
 use tracing::{debug, warn};
 
@@ -285,9 +286,9 @@ impl LinkSender {
         }
     }
 
-    /// Sends a clipboard update on its own stream (best effort, see the
-    /// module docs). Fails only when the link is closed or the text exceeds
-    /// [`macwin_proto::MAX_CLIPBOARD_TEXT`].
+    /// Queues a best-effort clipboard update for its own stream. Pending
+    /// updates are coalesced to the newest until a stream is opened.
+    /// Fails when the link is closed or the message exceeds its size limit.
     pub fn send_clipboard(&self, m: ClipboardMsg) -> Result<(), LinkError> {
         if !clipboard_within_limits(&m) {
             return Err(LinkError::TooLarge);
@@ -402,11 +403,47 @@ struct QuicShared {
     endpoint: Endpoint,
     control: mpsc::Sender<Bytes>,
     input: mpsc::Sender<Bytes>,
+    clipboard: Arc<ClipboardUpdates>,
     closing: AtomicBool,
     finish: watch::Sender<bool>,
     writers: Mutex<Vec<JoinHandle<()>>>,
     reason: Reason,
     runtime: tokio::runtime::Handle,
+}
+
+#[derive(Default)]
+struct ClipboardUpdates {
+    pending: Mutex<Option<Bytes>>,
+    notify: Notify,
+    stopped: AtomicBool,
+}
+
+impl ClipboardUpdates {
+    fn replace(&self, body: Bytes) -> bool {
+        let mut pending = lock(&self.pending);
+        if self.stopped.load(Ordering::Acquire) {
+            return false;
+        }
+        *pending = Some(body);
+        drop(pending);
+        self.notify.notify_one();
+        true
+    }
+
+    fn take(&self) -> Option<Bytes> {
+        lock(&self.pending).take()
+    }
+
+    fn stop_accepting(&self) {
+        let _pending = lock(&self.pending);
+        self.stopped.store(true, Ordering::Release);
+    }
+
+    fn stop(&self) {
+        let mut pending = lock(&self.pending);
+        self.stopped.store(true, Ordering::Release);
+        *pending = None;
+    }
 }
 
 impl QuicShared {
@@ -426,19 +463,16 @@ impl QuicShared {
     }
 
     fn send_clipboard(&self, m: &ClipboardMsg) -> Result<(), LinkError> {
-        if self.closing.load(Ordering::Acquire) {
+        if self.closing.load(Ordering::Acquire) || self.conn.close_reason().is_some() {
             return Err(LinkError::Closed);
         }
         let body = encode_clipboard(m);
         if body.len() > MAX_CLIPBOARD_FRAME {
             return Err(LinkError::TooLarge);
         }
-        let conn = self.conn.clone();
-        self.runtime.spawn(async move {
-            if let Err(e) = write_clipboard(&conn, &body).await {
-                debug!(error = %e, "clipboard transfer failed");
-            }
-        });
+        if !self.clipboard.replace(Bytes::from(body)) {
+            return Err(LinkError::Closed);
+        }
         Ok(())
     }
 
@@ -452,6 +486,7 @@ impl QuicShared {
                 code: u64::from(code),
             },
         );
+        self.clipboard.stop_accepting();
         let _ = self.finish.send(true);
         let writers = std::mem::take(&mut *lock(&self.writers));
         let conn = self.conn.clone();
@@ -473,6 +508,7 @@ impl QuicShared {
 
     fn close_now(&self, code: u32) {
         self.closing.store(true, Ordering::Release);
+        self.clipboard.stop_accepting();
         set_reason(
             &self.reason,
             LinkClosed::LocalClosed {
@@ -582,10 +618,12 @@ pub(crate) fn spawn_quic(endpoint: Endpoint, conn: Connection, streams: Streams)
     let (control_tx, control_rx) = mpsc::channel(QUEUE_CAPACITY);
     let (input_tx, input_rx) = mpsc::channel(QUEUE_CAPACITY);
     let (finish_tx, finish_rx) = watch::channel(false);
+    let clipboard = Arc::new(ClipboardUpdates::default());
     let reason: Reason = Arc::new(Mutex::new(None));
     let writers = vec![
         runtime.spawn(writer(streams.control_send, control_rx, finish_rx.clone())),
-        runtime.spawn(writer(streams.input_send, input_rx, finish_rx)),
+        runtime.spawn(writer(streams.input_send, input_rx, finish_rx.clone())),
+        runtime.spawn(clipboard_writer(conn.clone(), clipboard.clone(), finish_rx)),
     ];
     let readers = vec![
         runtime.spawn(stream_reader(
@@ -629,6 +667,7 @@ pub(crate) fn spawn_quic(endpoint: Endpoint, conn: Connection, streams: Streams)
                 endpoint,
                 control: control_tx,
                 input: input_tx,
+                clipboard,
                 closing: AtomicBool::new(false),
                 finish: finish_tx,
                 writers: Mutex::new(writers),
@@ -794,8 +833,65 @@ async fn datagram_reader(conn: Connection, tx: mpsc::Sender<Inbound>, reason: Re
     }
 }
 
-async fn write_clipboard(conn: &Connection, body: &[u8]) -> Result<(), String> {
-    let mut send = conn.open_uni().await.map_err(|e| e.to_string())?;
+async fn next_clipboard(
+    conn: &Connection,
+    updates: &ClipboardUpdates,
+    finish: &mut watch::Receiver<bool>,
+) -> Option<Bytes> {
+    loop {
+        if let Some(body) = updates.take() {
+            return Some(body);
+        }
+        tokio::select! {
+            biased;
+            () = async { let _ = finish.wait_for(|f| *f).await; } => return None,
+            _ = conn.closed() => return None,
+            () = updates.notify.notified() => {}
+        }
+    }
+}
+
+async fn clipboard_writer(
+    conn: Connection,
+    updates: Arc<ClipboardUpdates>,
+    mut finish: watch::Receiver<bool>,
+) {
+    'worker: loop {
+        let Some(mut body) = next_clipboard(&conn, &updates, &mut finish).await else {
+            break;
+        };
+        let open = conn.open_uni();
+        tokio::pin!(open);
+        let stream = loop {
+            tokio::select! {
+                biased;
+                () = async { let _ = finish.wait_for(|f| *f).await; } => break 'worker,
+                _ = conn.closed() => break 'worker,
+                result = &mut open => match result {
+                    Ok(stream) => break stream,
+                    Err(e) => {
+                        debug!(error = %e, "clipboard stream could not be opened");
+                        break 'worker;
+                    }
+                },
+                () = updates.notify.notified() => {
+                    if let Some(newest) = updates.take() {
+                        body = newest;
+                    }
+                }
+            }
+        };
+        if let Some(newest) = updates.take() {
+            body = newest;
+        }
+        if let Err(e) = write_clipboard(stream, &body).await {
+            debug!(error = %e, "clipboard transfer failed");
+        }
+    }
+    updates.stop();
+}
+
+async fn write_clipboard(mut send: SendStream, body: &[u8]) -> Result<(), String> {
     let _ = send.set_priority(CLIPBOARD_PRIORITY);
     send.write_all(&[STREAM_CLIPBOARD])
         .await
@@ -1010,6 +1106,18 @@ mod tests {
     use macwin_core::msg::{Leave, Ping};
 
     use super::*;
+
+    #[test]
+    fn clipboard_updates_replace_the_pending_value() {
+        let updates = ClipboardUpdates::default();
+        assert!(updates.replace(Bytes::from_static(b"older")));
+        assert!(updates.replace(Bytes::from_static(b"newest")));
+        assert_eq!(updates.take(), Some(Bytes::from_static(b"newest")));
+        assert_eq!(updates.take(), None);
+
+        updates.stop_accepting();
+        assert!(!updates.replace(Bytes::from_static(b"after close")));
+    }
 
     #[tokio::test]
     async fn file_header_length_accepts_valid_varints() {

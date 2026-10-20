@@ -439,9 +439,7 @@ async fn clipboard_updates_cross_on_their_own_streams() {
         }),
         ClipboardMsg::Other { clock: 2 },
     ];
-    for m in &msgs {
-        a.link.tx.send_clipboard(m.clone()).unwrap();
-    }
+    a.link.tx.send_clipboard(msgs[0].clone()).unwrap();
     // Heartbeat-like control traffic is not stuck behind the big text.
     a.link
         .tx
@@ -450,17 +448,20 @@ async fn clipboard_updates_cross_on_their_own_streams() {
             sent_micros: 1,
         }))
         .unwrap();
-    let mut got = Vec::new();
-    while got.len() < 2 {
+    let mut got_big_text = false;
+    let mut got_control = false;
+    while !got_big_text || !got_control {
         match next(&mut b.link).await {
-            Inbound::Clipboard(m) => got.push(m),
-            Inbound::Control(_) => {}
+            Inbound::Clipboard(m) => {
+                assert_eq!(m, msgs[0]);
+                got_big_text = true;
+            }
+            Inbound::Control(_) => got_control = true,
             other => panic!("unexpected {other:?}"),
         }
     }
-    // Separate streams may arrive in any order.
-    got.sort_by_key(ClipboardMsg::clock);
-    assert_eq!(got, msgs);
+    a.link.tx.send_clipboard(msgs[1].clone()).unwrap();
+    assert_eq!(next(&mut b.link).await, Inbound::Clipboard(msgs[1].clone()));
     // Oversized updates are refused locally.
     let huge = ClipboardMsg::Text(ClipboardText {
         clock: 3,
@@ -476,6 +477,130 @@ async fn clipboard_updates_cross_on_their_own_streams() {
             assert_eq!(c, LinkClosed::PeerClosed { code: 0 });
             break;
         }
+    }
+}
+
+mod clipboard_credit {
+    use std::time::Duration;
+
+    use macwin_core::msg::{ClipboardMsg, FileEntry, FilesHeader};
+    use macwin_net::link::{IncomingFiles, OutgoingFiles};
+    use macwin_net::tls::MAX_UNI_STREAMS;
+    use macwin_net::{Inbound, LinkClosed, codes};
+    use tokio::io::AsyncWriteExt;
+    use tokio::time::timeout;
+
+    use super::{T, good_pair, next};
+
+    async fn exhaust_credit(
+        a: &macwin_net::Session,
+        b: &mut macwin_net::Session,
+    ) -> (Vec<OutgoingFiles>, Vec<IncomingFiles>) {
+        let header = FilesHeader {
+            clock: 1,
+            entries: vec![FileEntry {
+                path: "pending.bin".into(),
+                size: 1,
+                dir: false,
+                executable: false,
+                mtime_ms: 0,
+            }],
+        };
+        let mut outgoing = Vec::with_capacity(MAX_UNI_STREAMS as usize);
+        let mut incoming = Vec::with_capacity(MAX_UNI_STREAMS as usize);
+        for _ in 0..MAX_UNI_STREAMS {
+            let mut transfer = a.link.tx.send_files(&header).await.unwrap();
+            transfer.write_all(&[0]).await.unwrap();
+            transfer.flush().await.unwrap();
+            outgoing.push(transfer);
+            incoming.push(
+                timeout(T, b.link.files.recv())
+                    .await
+                    .expect("peer did not accept a file stream")
+                    .expect("peer file queue closed"),
+            );
+        }
+        assert!(
+            timeout(Duration::from_millis(100), a.link.tx.send_files(&header),)
+                .await
+                .is_err(),
+            "all unidirectional stream credit should be held"
+        );
+
+        (outgoing, incoming)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn clipboard_updates_coalesce_while_stream_credit_is_exhausted() {
+        let (mut a, mut b) = good_pair().await;
+        let (outgoing, incoming) = exhaust_credit(&a, &mut b).await;
+
+        for clock in 0..64 {
+            a.link
+                .tx
+                .send_clipboard(ClipboardMsg::Other { clock })
+                .unwrap();
+        }
+        assert!(
+            timeout(Duration::from_millis(100), b.link.rx.recv())
+                .await
+                .is_err(),
+            "clipboard data cannot be sent without stream credit"
+        );
+
+        for transfer in outgoing {
+            transfer.cancel();
+        }
+        drop(incoming);
+
+        assert_eq!(
+            next(&mut b.link).await,
+            Inbound::Clipboard(ClipboardMsg::Other { clock: 63 })
+        );
+        assert!(
+            timeout(Duration::from_millis(100), b.link.rx.recv())
+                .await
+                .is_err(),
+            "only the newest pending clipboard update should be sent"
+        );
+
+        a.link.tx.close(codes::NORMAL);
+        assert_eq!(
+            next(&mut b.link).await,
+            Inbound::Closed(LinkClosed::PeerClosed { code: 0 })
+        );
+        assert_eq!(
+            next(&mut a.link).await,
+            Inbound::Closed(LinkClosed::LocalClosed { code: 0 })
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn clipboard_worker_stops_when_closed_under_stream_starvation() {
+        let (mut a, mut b) = good_pair().await;
+        let (outgoing, incoming) = exhaust_credit(&a, &mut b).await;
+        a.link
+            .tx
+            .send_clipboard(ClipboardMsg::Other { clock: 1 })
+            .unwrap();
+
+        a.link.tx.close(codes::NORMAL);
+        assert_eq!(
+            a.link.tx.send_clipboard(ClipboardMsg::Other { clock: 2 }),
+            Err(macwin_net::LinkError::Closed)
+        );
+
+        assert_eq!(
+            next(&mut b.link).await,
+            Inbound::Closed(LinkClosed::PeerClosed { code: 0 })
+        );
+        assert_eq!(
+            next(&mut a.link).await,
+            Inbound::Closed(LinkClosed::LocalClosed { code: 0 })
+        );
+        timeout(T, a.link.tx.wait_closed()).await.unwrap();
+        drop(outgoing);
+        drop(incoming);
     }
 }
 
