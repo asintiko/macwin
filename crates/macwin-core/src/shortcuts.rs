@@ -3,6 +3,7 @@
 //! written in the peer's own keys (the Ctrl <-> Cmd remap does not apply) as
 //! the peer's OS defines them by default.
 
+use crate::keys::KeySet;
 use crate::msg::{InputMsg, KeyMsg, WheelMsg};
 use crate::types::{Gesture, GesturePhase, Hid, ModifierMask, Os, WheelUnit};
 
@@ -57,6 +58,15 @@ fn key(hid: Hid, down: bool) -> InputMsg {
 /// already holds (`held`, in the peer's keys) are neither pressed nor
 /// released, so the user's own hold survives the shortcut.
 pub fn chord(keys: &[Hid], held: ModifierMask) -> Vec<InputMsg> {
+    chord_preserving_keys(keys, held, &KeySet::default())
+}
+
+/// As [`chord`], but repeats held main keys without releasing them.
+pub(crate) fn chord_preserving_keys(
+    keys: &[Hid],
+    held: ModifierMask,
+    held_keys: &KeySet,
+) -> Vec<InputMsg> {
     let pressed: Vec<Hid> = keys
         .iter()
         .copied()
@@ -65,7 +75,13 @@ pub fn chord(keys: &[Hid], held: ModifierMask) -> Vec<InputMsg> {
     pressed
         .iter()
         .map(|&k| key(k, true))
-        .chain(pressed.iter().rev().map(|&k| key(k, false)))
+        .chain(
+            pressed
+                .iter()
+                .rev()
+                .filter(|&&k| !held_keys.contains(k))
+                .map(|&k| key(k, false)),
+        )
         .collect()
 }
 
@@ -166,6 +182,23 @@ mod tests {
                 (Hid::LEFT_GUI, true),
                 (Hid::RIGHT_ARROW, true),
                 (Hid::RIGHT_ARROW, false),
+                (Hid::LEFT_GUI, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_chord_repeats_a_held_main_key_without_releasing_it() {
+        let held: KeySet = [Hid::SPACE].into_iter().collect();
+        assert_eq!(
+            keys(&chord_preserving_keys(
+                language_switch(Os::Windows),
+                ModifierMask::EMPTY,
+                &held,
+            )),
+            vec![
+                (Hid::LEFT_GUI, true),
+                (Hid::SPACE, true),
                 (Hid::LEFT_GUI, false),
             ]
         );

@@ -26,7 +26,7 @@ pub use crate::layout::EDGE_REENTRY_INSET;
 use crate::arrange::{Placement, resolve};
 use crate::geometry::ScreenSet;
 use crate::heartbeat::HeartbeatMonitor;
-use crate::keys::{ButtonSet, Pressed};
+use crate::keys::{ButtonSet, KeySet, Pressed};
 use crate::latency::{LinkProbe, RateMeter, SessionStats};
 use crate::layout::{Layout, Step};
 use crate::msg::{
@@ -35,7 +35,7 @@ use crate::msg::{
 };
 use crate::os::pixels_to_notch120;
 use crate::remap::Remap;
-use crate::shortcuts::{ZoomSteps, chord, gesture_keys, language_switch, zoom};
+use crate::shortcuts::{ZoomSteps, chord_preserving_keys, gesture_keys, language_switch, zoom};
 use crate::types::{
     CaptureFault, CapturedEvent, GeometryError, Gesture, GrabCommand, Hid, InjectCommand,
     ModifierMask, Os, PointF, RoleKind, ScreenInfo, WheelUnit,
@@ -179,6 +179,26 @@ fn key_up(hid: Hid) -> InjectCommand {
 fn end_controlling(input: &mut LocalInput, c: &Controlling) {
     input.held_from_remote = input.keys.difference(&c.pre_grab);
     input.buttons_from_remote = input.buttons;
+}
+
+/// Keys eligible for a peer chord that remain physically held.
+fn held_keys_for_chord(input: &LocalInput, c: &Controlling, remap: Remap) -> KeySet {
+    let mut keys = KeySet::new();
+    for hid in input.keys.difference(&c.pre_grab).iter() {
+        keys.insert(remap.map_hid(hid));
+    }
+    keys
+}
+
+fn has_locally_held_input(input: &LocalInput) -> bool {
+    input
+        .keys
+        .iter()
+        .any(|hid| !input.held_from_remote.contains(hid))
+        || input
+            .buttons
+            .iter()
+            .any(|button| !input.buttons_from_remote.contains(button))
 }
 
 fn release_target(c: &mut Controlled, actions: &mut Vec<Action>) {
@@ -553,7 +573,12 @@ impl Engine {
                 }
                 self.input.held_from_remote.remove(Hid::APPLE_FN);
                 if c.fn_tap.take() == Some(true) {
-                    return swallow(sends(chord(language_switch(s.peer.os), held)));
+                    let held_keys = held_keys_for_chord(&self.input, c, s.remap);
+                    return swallow(sends(chord_preserving_keys(
+                        language_switch(s.peer.os),
+                        held,
+                        &held_keys,
+                    )));
                 }
                 swallow(Vec::new())
             }
@@ -620,7 +645,10 @@ impl Engine {
                         zoom(s.peer.os, c.zoom.on_magnify(delta, phase), held)
                     }
                     Gesture::SwitchSpace { .. } | Gesture::Overview => {
-                        gesture_keys(s.peer.os, g).map_or_else(Vec::new, |k| chord(k, held))
+                        let held_keys = held_keys_for_chord(&self.input, c, s.remap);
+                        gesture_keys(s.peer.os, g).map_or_else(Vec::new, |keys| {
+                            chord_preserving_keys(keys, held, &held_keys)
+                        })
                     }
                     Gesture::Other => Vec::new(),
                 };
@@ -775,6 +803,15 @@ impl Engine {
             return Vec::new();
         }
         s.epoch_max = en.epoch;
+        if matches!(s.role, Role::Idle) && has_locally_held_input(&self.input) {
+            debug!(
+                epoch = en.epoch,
+                "declined peer enter while local input is held"
+            );
+            return vec![Action::SendInput(InputMsg::TakeControl(TakeControl {
+                epoch: en.epoch,
+            }))];
+        }
         let mut actions = Vec::new();
         leave_role(&mut self.input, s, &mut actions, false);
         let at = s.layout.local().clamp(en.at);

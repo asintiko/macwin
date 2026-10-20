@@ -1831,6 +1831,293 @@ fn a_tap_of_fn_switches_the_pcs_language() {
 }
 
 #[test]
+fn held_input_regression_fn_chord_preserves_already_pressed_space() {
+    let t0 = Instant::now();
+    let mut e = mac_controlling(t0);
+    assert_eq!(
+        e.on_local_event(t0, key(Hid::SPACE, true)),
+        swallowed(vec![send_key(Hid::SPACE, true, false)])
+    );
+    assert_eq!(e.on_local_event(t0, fn_key(true)), swallowed(vec![]));
+    assert_eq!(
+        e.on_local_event(t0, fn_key(false)),
+        swallowed(vec![
+            send_key(Hid::LEFT_GUI, true, false),
+            send_key(Hid::SPACE, true, false),
+            send_key(Hid::LEFT_GUI, false, false),
+        ])
+    );
+    assert_eq!(
+        e.on_local_event(t0, key(Hid::SPACE, false)),
+        swallowed(vec![send_key(Hid::SPACE, false, false)])
+    );
+}
+
+#[test]
+fn held_input_regression_gesture_chord_preserves_already_pressed_arrow() {
+    let t0 = Instant::now();
+    let mut e = mac_controlling(t0);
+    assert_eq!(
+        e.on_local_event(t0, key(Hid::RIGHT_ARROW, true)),
+        swallowed(vec![send_key(Hid::RIGHT_ARROW, true, false)])
+    );
+    assert_eq!(
+        e.on_local_event(t0, gesture(Gesture::SwitchSpace { next: true })),
+        swallowed(vec![
+            send_key(Hid::LEFT_CTRL, true, false),
+            send_key(Hid::LEFT_GUI, true, false),
+            send_key(Hid::RIGHT_ARROW, true, false),
+            send_key(Hid::LEFT_GUI, false, false),
+            send_key(Hid::LEFT_CTRL, false, false),
+        ])
+    );
+    assert_eq!(
+        e.on_local_event(t0, key(Hid::RIGHT_ARROW, false)),
+        swallowed(vec![send_key(Hid::RIGHT_ARROW, false, false)])
+    );
+}
+
+#[test]
+fn fn_chord_after_reentry_preserves_remote_held_space() {
+    let t0 = Instant::now();
+    let mut mac = mac_controlling(t0);
+    let mut pc = win_controlled(t0);
+
+    assert_eq!(
+        mac.on_local_event(t0, key(Hid::SPACE, true)),
+        swallowed(vec![send_key(Hid::SPACE, true, false)])
+    );
+    assert_eq!(
+        pc.on_input(
+            t0,
+            InputMsg::Key(KeyMsg {
+                hid: Hid::SPACE,
+                down: true,
+                repeat: false,
+            })
+        ),
+        vec![inj_key(Hid::SPACE, true, false)]
+    );
+
+    assert_eq!(
+        mac.on_local_event(t0, delta(-5.0, 0.0)),
+        swallowed(vec![
+            Action::SendInput(InputMsg::Leave(Leave { epoch: 1 })),
+            Action::Capture(GrabCommand::Release {
+                warp_to: Point::new(1437, 450),
+            }),
+        ])
+    );
+    assert_eq!(
+        pc.on_input(t0, InputMsg::Leave(Leave { epoch: 1 })),
+        vec![inj_key(Hid::SPACE, false, false)]
+    );
+    assert_eq!(mac.on_local_event(t0, mv(1437.0, 450.0)), delivered());
+
+    let entered = mac.on_local_event(t0, mv(1439.0, 450.0));
+    assert_eq!(
+        entered,
+        swallowed(enter_actions(
+            t0,
+            3,
+            Point::new(0, 540),
+            ModifierMask::EMPTY,
+            Point::new(1439, 450)
+        ))
+    );
+    for action in entered.actions {
+        if let Action::SendInput(message) = action {
+            pc.on_input(t0, message);
+        }
+    }
+
+    let repeated = mac.on_local_event(t0, key(Hid::SPACE, true));
+    assert_eq!(repeated, swallowed(vec![send_key(Hid::SPACE, true, true)]));
+    assert_eq!(
+        pc.on_input(
+            t0,
+            InputMsg::Key(KeyMsg {
+                hid: Hid::SPACE,
+                down: true,
+                repeat: true,
+            })
+        ),
+        vec![],
+        "the new control epoch has no initial Space down yet"
+    );
+
+    mac.on_local_event(t0, fn_key(true));
+    let shortcut = mac.on_local_event(t0, fn_key(false));
+    assert_eq!(
+        shortcut,
+        swallowed(vec![
+            send_key(Hid::LEFT_GUI, true, false),
+            send_key(Hid::SPACE, true, false),
+            send_key(Hid::LEFT_GUI, false, false),
+        ])
+    );
+    let mut injected = Vec::new();
+    for action in shortcut.actions {
+        let Action::SendInput(message) = action else {
+            panic!("Fn shortcut should only send input messages");
+        };
+        injected.extend(pc.on_input(t0, message));
+    }
+    assert_eq!(
+        injected,
+        vec![
+            inj_key(Hid::LEFT_GUI, true, false),
+            inj_key(Hid::SPACE, true, false),
+            inj_key(Hid::LEFT_GUI, false, false),
+        ]
+    );
+
+    assert_eq!(
+        mac.on_local_event(t0, key(Hid::SPACE, false)),
+        swallowed(vec![send_key(Hid::SPACE, false, false)])
+    );
+    assert_eq!(
+        pc.on_input(
+            t0,
+            InputMsg::Key(KeyMsg {
+                hid: Hid::SPACE,
+                down: false,
+                repeat: false,
+            })
+        ),
+        vec![inj_key(Hid::SPACE, false, false)],
+        "the physical up releases Space after the shortcut"
+    );
+}
+
+#[test]
+fn fn_chord_does_not_adopt_space_held_before_crossing() {
+    let t0 = Instant::now();
+    let mut mac = mac_session(t0, TransportRole::Dialer);
+    assert_eq!(mac.on_local_event(t0, key(Hid::SPACE, true)), delivered());
+    assert_eq!(
+        mac.on_local_event(t0, mv(1439.5, 450.0)),
+        swallowed(enter_actions(
+            t0,
+            1,
+            Point::new(0, 540),
+            ModifierMask::EMPTY,
+            Point::new(1439, 450)
+        ))
+    );
+
+    mac.on_local_event(t0, fn_key(true));
+    assert_eq!(
+        mac.on_local_event(t0, fn_key(false)),
+        swallowed(vec![
+            send_key(Hid::LEFT_GUI, true, false),
+            send_key(Hid::SPACE, true, false),
+            send_key(Hid::SPACE, false, false),
+            send_key(Hid::LEFT_GUI, false, false),
+        ])
+    );
+}
+
+#[test]
+fn held_input_regression_enter_respects_local_key_until_its_release() {
+    let t0 = Instant::now();
+    let mut e = win_session(t0, TransportRole::Listener, 1.0);
+    assert_eq!(e.on_local_event(t0, key(KEY_A, true)), delivered());
+    let enter = InputMsg::Enter(Enter {
+        epoch: 1,
+        at: Point::new(0, 540),
+    });
+    assert_eq!(
+        e.on_input(t0, enter),
+        vec![Action::SendInput(InputMsg::TakeControl(TakeControl {
+            epoch: 1
+        }))]
+    );
+    assert_eq!(e.role(), RoleKind::Idle);
+    assert_eq!(
+        e.on_input(
+            t0,
+            InputMsg::Key(KeyMsg {
+                hid: KEY_A,
+                down: true,
+                repeat: false,
+            })
+        ),
+        vec![]
+    );
+    assert_eq!(
+        e.on_local_event(t0, key(KEY_A, false)),
+        delivered(),
+        "the key-up belongs to the local down"
+    );
+    assert_eq!(
+        e.on_input(
+            t0,
+            InputMsg::Key(KeyMsg {
+                hid: KEY_A,
+                down: false,
+                repeat: false,
+            })
+        ),
+        vec![]
+    );
+    assert_eq!(e.role(), RoleKind::Idle);
+    assert_eq!(e.on_input(t0, enter), vec![], "the declined epoch is stale");
+}
+
+#[test]
+fn held_input_regression_enter_respects_local_button_until_its_release() {
+    let t0 = Instant::now();
+    let mut e = win_session(t0, TransportRole::Listener, 1.0);
+    let at = Point::new(100, 100);
+    assert_eq!(
+        e.on_local_event(t0, button(MouseButton::Left, true)),
+        delivered()
+    );
+    assert_eq!(
+        e.on_input(
+            t0,
+            InputMsg::Enter(Enter {
+                epoch: 1,
+                at: Point::new(0, 540),
+            })
+        ),
+        vec![Action::SendInput(InputMsg::TakeControl(TakeControl {
+            epoch: 1
+        }))]
+    );
+    assert_eq!(e.role(), RoleKind::Idle);
+    assert_eq!(
+        e.on_input(
+            t0,
+            InputMsg::Button(ButtonMsg {
+                button: MouseButton::Left,
+                down: true,
+                at,
+            })
+        ),
+        vec![]
+    );
+    assert_eq!(
+        e.on_local_event(t0, button(MouseButton::Left, false)),
+        delivered(),
+        "the button-up belongs to the local down"
+    );
+    assert_eq!(
+        e.on_input(
+            t0,
+            InputMsg::Button(ButtonMsg {
+                button: MouseButton::Left,
+                down: false,
+                at,
+            })
+        ),
+        vec![]
+    );
+    assert_eq!(e.role(), RoleKind::Idle);
+}
+
+#[test]
 fn fn_keeps_a_held_modifier_and_stays_local_when_idle() {
     let t0 = Instant::now();
     let mut e = mac_controlling(t0);
@@ -1914,6 +2201,74 @@ fn gestures_are_swallowed_and_sent_as_the_pcs_shortcuts() {
             wheel_notch(-120),
             send_key(Hid::LEFT_CTRL, false, false),
         ])
+    );
+}
+
+#[test]
+fn repeated_chord_key_stays_pressed_at_peer_until_physical_up() {
+    let t0 = Instant::now();
+    let mut mac = mac_controlling(t0);
+    let mut pc = win_controlled(t0);
+
+    assert_eq!(
+        mac.on_local_event(t0, key(Hid::SPACE, true)),
+        swallowed(vec![send_key(Hid::SPACE, true, false)])
+    );
+    assert_eq!(
+        pc.on_input(
+            t0,
+            InputMsg::Key(KeyMsg {
+                hid: Hid::SPACE,
+                down: true,
+                repeat: false,
+            })
+        ),
+        vec![inj_key(Hid::SPACE, true, false)]
+    );
+
+    mac.on_local_event(t0, fn_key(true));
+    let shortcut = mac.on_local_event(t0, fn_key(false));
+    assert_eq!(
+        shortcut,
+        swallowed(vec![
+            send_key(Hid::LEFT_GUI, true, false),
+            send_key(Hid::SPACE, true, false),
+            send_key(Hid::LEFT_GUI, false, false),
+        ])
+    );
+
+    let mut remote_results = Vec::new();
+    for action in shortcut.actions {
+        let Action::SendInput(message) = action else {
+            panic!("Fn shortcut should only send input messages");
+        };
+        remote_results.push(pc.on_input(t0, message));
+    }
+    assert_eq!(
+        remote_results,
+        vec![
+            vec![inj_key(Hid::LEFT_GUI, true, false)],
+            vec![inj_key(Hid::SPACE, true, true)],
+            vec![inj_key(Hid::LEFT_GUI, false, false)],
+        ],
+        "the peer interprets the extra down as a repeat, without releasing Space"
+    );
+
+    assert_eq!(
+        mac.on_local_event(t0, key(Hid::SPACE, false)),
+        swallowed(vec![send_key(Hid::SPACE, false, false)])
+    );
+    assert_eq!(
+        pc.on_input(
+            t0,
+            InputMsg::Key(KeyMsg {
+                hid: Hid::SPACE,
+                down: false,
+                repeat: false,
+            })
+        ),
+        vec![inj_key(Hid::SPACE, false, false)],
+        "the physical up remains the release for the held key"
     );
 }
 
