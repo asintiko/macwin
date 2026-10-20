@@ -663,6 +663,32 @@ fn violation(conn: &Connection, reason: &Mutex<Option<LinkClosed>>, msg: String)
     );
 }
 
+fn violation_if_open(conn: &Connection, reason: &Reason, msg: String) {
+    if conn.close_reason().is_none() {
+        violation(conn, reason, msg);
+    }
+}
+
+async fn required_stream_ended(
+    conn: &Connection,
+    reason: &Reason,
+    channel: Channel,
+    detail: String,
+    allow_graceful_close: bool,
+) {
+    if conn.close_reason().is_some() {
+        return;
+    }
+    if allow_graceful_close {
+        // A graceful close finishes both streams before closing the connection.
+        let grace = GRACEFUL_CLOSE_TIMEOUT + Duration::from_millis(250);
+        if tokio::time::timeout(grace, conn.closed()).await.is_ok() {
+            return;
+        }
+    }
+    violation_if_open(conn, reason, format!("{channel:?} stream {detail}"));
+}
+
 async fn writer(
     mut send: SendStream,
     mut rx: mpsc::Receiver<Bytes>,
@@ -728,10 +754,21 @@ async fn stream_reader(
             Ok(Some(chunk)) => buf.push(&chunk.bytes),
             Ok(None) => {
                 debug!(?ch, "peer finished its stream");
+                let buffered = buf.buffered();
+                let (detail, allow_graceful_close) = if buffered == 0 {
+                    ("ended before connection close".to_string(), true)
+                } else {
+                    (
+                        format!("ended with an incomplete frame ({buffered} buffered bytes)"),
+                        false,
+                    )
+                };
+                required_stream_ended(&conn, &reason, ch, detail, allow_graceful_close).await;
                 return;
             }
             Err(e) => {
                 debug!(?ch, error = %e, "stream read ended");
+                required_stream_ended(&conn, &reason, ch, format!("read failed: {e}"), false).await;
                 return;
             }
         }

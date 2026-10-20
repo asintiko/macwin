@@ -10,8 +10,11 @@ use macwin_core::msg::{
 };
 use macwin_core::types::{Hid, Os, Point, Rect, ScreenInfo, Side};
 use macwin_net::link::Link;
+use macwin_net::tls;
 use macwin_net::{Identity, Inbound, LinkClosed, NetError, Session, codes, connect, listen};
-use macwin_proto::{PROTOCOL_VERSION, ProtoError};
+use macwin_proto::frame::{self, FrameBuffer};
+use macwin_proto::{PROTOCOL_VERSION, ProtoError, decode_control, encode_control};
+use quinn::{Endpoint, RecvStream, SendStream, VarInt};
 use tokio::time::timeout;
 
 const T: Duration = Duration::from_secs(5);
@@ -87,6 +90,99 @@ async fn good_pair() -> (Session, Session) {
     )
     .await;
     (p.dialer.unwrap(), p.listener.unwrap())
+}
+
+struct RawPeer {
+    _endpoint: Endpoint,
+    control_send: SendStream,
+    input_send: SendStream,
+    _control_recv: RecvStream,
+    _input_recv: RecvStream,
+}
+
+async fn raw_peer_pair() -> (Session, RawPeer) {
+    let dialer_id = Identity::generate().unwrap();
+    let listener_id = Identity::generate().unwrap();
+    let listener_fp = listener_id.fingerprint();
+    let endpoint = Endpoint::server(
+        tls::server_config(&listener_id, dialer_id.fingerprint()).unwrap(),
+        localhost(),
+    )
+    .unwrap();
+    let addr = endpoint.local_addr().unwrap();
+    let accept = tokio::spawn(async move {
+        let incoming = endpoint.accept().await.expect("incoming connection");
+        let conn = incoming.await.expect("QUIC connection");
+        let mut control: Option<(SendStream, RecvStream)> = None;
+        let mut input: Option<(SendStream, RecvStream)> = None;
+        for _ in 0..2 {
+            let (send, mut recv) = conn.accept_bi().await.unwrap();
+            let mut header = [0u8; 1];
+            recv.read_exact(&mut header).await.unwrap();
+            match header[0] {
+                0x01 => control = Some((send, recv)),
+                0x02 => input = Some((send, recv)),
+                other => panic!("unexpected stream header: {other:#04x}"),
+            }
+        }
+        let (mut control_send, mut control_recv) = control.expect("control stream");
+        let (input_send, input_recv) = input.expect("input stream");
+        let peer_hello = raw_read_frame(&mut control_recv).await;
+        assert!(matches!(
+            decode_control(&peer_hello),
+            Ok(ControlMsg::Hello(_))
+        ));
+        let response = frame::encode(&encode_control(&ControlMsg::Hello(hello(
+            "raw listener",
+            Os::Windows,
+        ))));
+        control_send.write_all(&response).await.unwrap();
+        RawPeer {
+            _endpoint: endpoint,
+            control_send,
+            input_send,
+            _control_recv: control_recv,
+            _input_recv: input_recv,
+        }
+    });
+    let session = timeout(
+        T,
+        connect(
+            localhost(),
+            addr,
+            &dialer_id,
+            listener_fp,
+            &hello("raw dialer", Os::MacOs),
+        ),
+    )
+    .await
+    .expect("raw peer dial timed out")
+    .unwrap();
+    let peer = timeout(T, accept)
+        .await
+        .expect("raw peer accept timed out")
+        .unwrap();
+    (session, peer)
+}
+
+async fn raw_read_frame(recv: &mut RecvStream) -> Vec<u8> {
+    let mut frames = FrameBuffer::new();
+    loop {
+        let chunk = recv
+            .read_chunk(1024, true)
+            .await
+            .unwrap()
+            .expect("frame bytes");
+        frames.push(&chunk.bytes);
+        if let Some(frame) = frames.next_frame().unwrap() {
+            return frame.to_vec();
+        }
+    }
+}
+
+async fn assert_single_closed(link: &mut Link) {
+    assert!(matches!(next(link).await, Inbound::Closed(_)));
+    assert_eq!(timeout(T, link.rx.recv()).await.unwrap(), None);
 }
 
 async fn next(link: &mut Link) -> Inbound {
@@ -251,7 +347,33 @@ async fn graceful_close_delivers_everything_in_order_first() {
         next(&mut a.link).await,
         Inbound::Closed(LinkClosed::LocalClosed { code: 0 })
     );
+    assert_eq!(timeout(T, a.link.rx.recv()).await.unwrap(), None);
+    assert_eq!(timeout(T, b.link.rx.recv()).await.unwrap(), None);
     timeout(T, a.link.tx.wait_closed()).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn required_control_stream_fin_closes_link_without_peer_connection_close() {
+    let (mut session, mut peer) = raw_peer_pair().await;
+    peer.control_send.finish().unwrap();
+    assert_single_closed(&mut session.link).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn required_input_stream_reset_closes_link() {
+    let (mut session, mut peer) = raw_peer_pair().await;
+    peer.input_send
+        .reset(VarInt::from_u32(codes::INTERNAL))
+        .unwrap();
+    assert_single_closed(&mut session.link).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn incomplete_last_frame_closes_link_on_stream_fin() {
+    let (mut session, mut peer) = raw_peer_pair().await;
+    peer.control_send.write_all(&[0x02, 0x08]).await.unwrap();
+    peer.control_send.finish().unwrap();
+    assert_single_closed(&mut session.link).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -474,11 +596,12 @@ mod pairing {
 }
 
 mod files {
-    use macwin_core::msg::{FileEntry, FilesHeader};
+    use macwin_core::msg::{ControlMsg, FileEntry, FilesHeader, Ping};
+    use macwin_net::Inbound;
     use macwin_net::link::{FilesDelivery, Link};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    use super::{T, good_pair};
+    use super::{T, good_pair, next};
 
     fn header(sizes: &[u64]) -> FilesHeader {
         FilesHeader {
@@ -570,6 +693,16 @@ mod files {
             .await
             .unwrap();
         assert!(r.is_err(), "a reset stream is an error, not a short file");
+        assert!(!a.link.tx.is_closed() && !b.link.tx.is_closed());
+        let ping = Ping {
+            id: 99,
+            sent_micros: 100,
+        };
+        a.link.tx.send_control(ControlMsg::Ping(ping)).unwrap();
+        assert_eq!(
+            next(&mut b.link).await,
+            Inbound::Control(ControlMsg::Ping(ping))
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
