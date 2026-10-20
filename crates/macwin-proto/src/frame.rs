@@ -47,7 +47,8 @@ impl FrameBuffer {
             let Some(&byte) = self.buf.get(prefix) else {
                 return Ok(None);
             };
-            if prefix == MAX_VARINT_LEN {
+            // The tenth byte has room for one bit and must end the varint.
+            if prefix == MAX_VARINT_LEN - 1 && byte > 1 {
                 return Err(ProtoError::FrameTooLarge { len: usize::MAX });
             }
             len |= u64::from(byte & 0x7F) << (7 * prefix);
@@ -143,6 +144,21 @@ mod tests {
             fb.next_frame(),
             Err(ProtoError::FrameTooLarge { .. })
         ));
+    }
+
+    #[test]
+    fn overflowing_or_unterminated_tenth_byte_is_rejected_immediately() {
+        for last in [0x02, 0x7e, 0x80] {
+            let mut fb = FrameBuffer::new();
+            fb.push(&[0x80; 9]);
+            assert_eq!(fb.next_frame().unwrap(), None);
+            fb.push(&[last]);
+            assert!(matches!(
+                fb.next_frame(),
+                Err(ProtoError::FrameTooLarge { .. })
+            ));
+            assert_eq!(fb.buffered(), 10);
+        }
     }
 
     proptest! {
