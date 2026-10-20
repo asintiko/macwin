@@ -999,7 +999,7 @@ mod tests {
                 retry_max: Duration::ZERO,
                 connect_timeout: Duration::ZERO,
                 window: false,
-                screens: Arc::new(|| Vec::new()),
+                screens: Arc::new(Vec::new),
                 permissions: None,
             },
             shared: Arc::new(TrayShared::new(ui_tx, false)),
