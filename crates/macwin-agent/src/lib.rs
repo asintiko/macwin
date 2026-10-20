@@ -15,6 +15,7 @@ use macwin_core::types::Os;
 pub mod clipboard;
 pub mod config;
 pub mod identity_store;
+mod injection;
 pub mod instance;
 pub mod lan;
 pub mod pairing;

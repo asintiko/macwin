@@ -5,8 +5,8 @@
 //!
 //! Concurrency: one `Arc<Mutex<Core>>`. The capture thread locks it from
 //! `CaptureSink::on_event`; the async loop locks it for link messages, ticks
-//! and shutdown. Nothing awaits while holding the lock, and the lock order
-//! is always Core -> backend internals.
+//! and shutdown. Native injection runs on its own ordered worker: it may
+//! synchronously call capture hooks, so it must never hold the Core lock.
 
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
@@ -20,7 +20,9 @@ use macwin_core::msg::{
     CAP_CLIPBOARD_FILES, CAP_CLIPBOARD_IMAGE, CAP_CLIPBOARD_TEXT, CAP_INPUT_CAPTURE,
     CAP_INPUT_INJECT, CAP_WHEEL_PIXEL, Hello,
 };
-use macwin_core::types::{CaptureFault, CapturedEvent, Os, RoleKind, ScreenInfo, Side};
+use macwin_core::types::{
+    CaptureFault, CapturedEvent, InjectCommand, Os, RoleKind, ScreenInfo, Side,
+};
 use macwin_net::codes;
 use macwin_net::link::{Inbound, IncomingFiles, Link, LinkClosed, LinkSender};
 use macwin_platform::{
@@ -33,6 +35,7 @@ use tokio::task::JoinHandle;
 use tokio::time::MissedTickBehavior;
 use tracing::{debug, info, warn};
 
+use crate::injection::{InjectionQueue, InjectionWorker};
 pub use crate::sharing::ClipboardSettings;
 use crate::sharing::{Sharing, SharingEvents};
 
@@ -193,13 +196,13 @@ impl Drop for SessionHandle {
 
 struct Core {
     engine: Engine,
-    injector: Box<dyn InputInjector>,
+    injector: InjectionQueue,
     capture: Option<Arc<dyn CaptureControl>>,
     link: LinkSender,
     role_tx: watch::Sender<RoleKind>,
     stats_tx: watch::Sender<Option<SessionStats>>,
     /// Time this process adds, per stage.
-    stages: StageTimes,
+    stages: Arc<Mutex<StageTimes>>,
     end: Option<SessionEnd>,
 }
 
@@ -212,11 +215,7 @@ fn forwards(actions: &[Action]) -> bool {
         .any(|a| matches!(a, Action::SendDatagram(_) | Action::SendInput(_)))
 }
 
-fn injects(actions: &[Action]) -> bool {
-    actions.iter().any(|a| matches!(a, Action::Inject(_)))
-}
-
-fn lock(core: &Mutex<Core>) -> MutexGuard<'_, Core> {
+fn lock<T>(core: &Mutex<T>) -> MutexGuard<'_, T> {
     // A panic elsewhere must not leave input grabbed: keep going.
     core.lock().unwrap_or_else(|e| e.into_inner())
 }
@@ -251,6 +250,10 @@ impl Core {
 
     /// Executes Engine actions in order.
     fn dispatch(&mut self, actions: Vec<Action>) {
+        self.dispatch_timed(actions, None);
+    }
+
+    fn dispatch_timed(&mut self, actions: Vec<Action>, mut received: Option<Instant>) {
         for action in actions {
             match action {
                 Action::SendControl(m) => {
@@ -269,8 +272,13 @@ impl Core {
                 }
                 Action::SendDatagram(m) => self.link.send_datagram(m),
                 Action::Inject(cmd) => {
-                    if let Err(e) = self.injector.inject(cmd) {
-                        warn!(error = %e, "injection failed");
+                    let received = if matches!(cmd, InjectCommand::MoveTo(_)) {
+                        received.take()
+                    } else {
+                        None
+                    };
+                    if let Err(e) = self.injector.send(cmd, received) {
+                        self.set_end(SessionEnd::Internal(e));
                     }
                 }
                 Action::Capture(cmd) => {
@@ -327,11 +335,11 @@ async fn next_of<T>(rx: &mut Option<mpsc::Receiver<T>>) -> Option<T> {
     }
 }
 
-/// A started capture backend and its control. The backend must live as long
-/// as the session: real backends stop their capture thread when dropped.
-struct Capture {
+/// The input threads live until the session's cleanup has completed.
+struct InputWorkers {
     control: Arc<dyn CaptureControl>,
-    _backend: Box<dyn InputCapture>,
+    _capture: Box<dyn InputCapture>,
+    injection: InjectionWorker,
 }
 
 struct Sink {
@@ -351,7 +359,7 @@ impl CaptureSink for Sink {
         let forwarded = forwards(&out.actions);
         core.dispatch(out.actions);
         if forwarded {
-            core.stages.record_send(start.elapsed());
+            lock(&core.stages).record_send(start.elapsed());
         }
         if core.end.is_some() {
             self.wake.notify_one();
@@ -419,6 +427,10 @@ pub fn spawn_session(
     }
     let (role_tx, role_rx) = watch::channel(RoleKind::Idle);
     let (stats_tx, stats_rx) = watch::channel(None);
+    let wake = Arc::new(Notify::new());
+    let stages = Arc::new(Mutex::new(StageTimes::default()));
+    let (injector, injection) =
+        InjectionWorker::start(injector, stages.clone(), wake.clone()).map_err(|e| fail(&tx, e))?;
     let core = Arc::new(Mutex::new(Core {
         engine,
         injector,
@@ -426,10 +438,9 @@ pub fn spawn_session(
         link: tx.clone(),
         role_tx,
         stats_tx,
-        stages: StageTimes::default(),
+        stages,
         end: None,
     }));
-    let wake = Arc::new(Notify::new());
     let control = capture
         .start(Arc::new(Sink {
             core: core.clone(),
@@ -453,9 +464,10 @@ pub fn spawn_session(
         cfg.timings,
         shutdown.clone(),
         wake,
-        Capture {
+        InputWorkers {
             control,
-            _backend: capture,
+            _capture: capture,
+            injection,
         },
         sharing,
     ));
@@ -480,7 +492,7 @@ async fn run(
     timings: Timings,
     shutdown: Arc<Notify>,
     wake: Arc<Notify>,
-    capture: Capture,
+    input: InputWorkers,
     sharing: Option<(Sharing, SharingEvents)>,
 ) -> SessionEnd {
     let Channels { mut rx, files } = channels;
@@ -529,11 +541,7 @@ async fn run(
                     }
                     Some(Inbound::Datagram(m)) => {
                         let a = c.engine.on_datagram(now, m);
-                        let injected = injects(&a);
-                        c.dispatch(a);
-                        if injected {
-                            c.stages.record_receive(now.elapsed());
-                        }
+                        c.dispatch_timed(a, Some(now));
                     }
                     Some(Inbound::Closed(reason)) => {
                         info!(?reason, "link closed");
@@ -551,7 +559,7 @@ async fn run(
             scheduled = tick.tick() => {
                 let mut c = lock(&core);
                 let now = Instant::now();
-                c.stages.record_loop_lag(now.saturating_duration_since(scheduled.into_std()));
+                lock(&c.stages).record_loop_lag(now.saturating_duration_since(scheduled.into_std()));
                 let mut a = c.engine.on_tick(now);
                 let ping = c.engine.poll_ping(now);
                 let pinged = ping.is_some();
@@ -559,7 +567,7 @@ async fn run(
                 c.dispatch(a);
                 if pinged {
                     let stats = c.engine.stats(now).map(|mut s| {
-                        s.added = c.stages.summary();
+                        s.added = lock(&c.stages).summary();
                         s
                     });
                     if now >= next_stats_log {
@@ -567,7 +575,7 @@ async fn run(
                         if let Some(s) = &stats {
                             debug!("link statistics: {}", summary_line(s));
                         }
-                        c.stages.rotate();
+                        lock(&c.stages).rotate();
                     }
                     c.stats_tx.send_replace(stats);
                 }
@@ -580,28 +588,37 @@ async fn run(
             }
             () = wake.notified() => {}
         }
-        let mut c = lock(&core);
-        if let Some(end) = c.end.clone() {
-            // Make sure nothing stays injected or grabbed, whatever ended it.
-            if c.engine.has_session() {
-                let a = c.engine.on_disconnected(Instant::now());
-                c.dispatch(a);
+        let end = {
+            let mut c = lock(&core);
+            if let Some(error) = c.injector.error() {
+                c.set_end(SessionEnd::Internal(error));
             }
-            if !c.link.is_closed() {
-                c.link.close_now(codes::INTERNAL);
+            if c.end.is_some() {
+                if c.engine.has_session() {
+                    let a = c.engine.on_disconnected(Instant::now());
+                    c.dispatch(a);
+                }
+                if !c.link.is_closed() {
+                    c.link.close_now(codes::INTERNAL);
+                }
+                // Break Core -> control -> backend state -> sink -> Core.
+                c.capture = None;
             }
-            // Core -> control -> backend state -> sink -> Core is a cycle:
-            // break it so the session (and its connection) can be freed.
-            c.capture = None;
-            drop(c);
-            capture.control.stop();
+            c.end.clone()
+        };
+        if let Some(end) = end {
+            input.injection.stop();
+            input.control.stop();
             let sharing = sharing.take();
-            // Dropping the backends joins their threads: keep that off the
-            // async workers.
-            tokio::task::spawn_blocking(move || {
-                drop(capture);
+            // Reconnection must not race the old workers' final releases.
+            let cleanup = tokio::task::spawn_blocking(move || {
+                drop(input);
                 drop(sharing);
-            });
+            })
+            .await;
+            if let Err(e) = cleanup {
+                return SessionEnd::Internal(format!("session cleanup failed: {e}"));
+            }
             info!(?end, "session ended");
             return end;
         }

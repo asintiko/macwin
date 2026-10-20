@@ -22,6 +22,7 @@ use macwin_platform::testing::{
     FakeCapture, FakeCaptureHandle, FakeClipboard, FakeClipboardHandle, FakeInjector,
     FakeInjectorHandle, FakeScreens,
 };
+use macwin_platform::{InputInjector, PlatformError};
 
 const T: Duration = Duration::from_secs(5);
 const KEY_A: Hid = Hid(0x07_0004);
@@ -95,12 +96,22 @@ fn spawn_peer(
     session: Session,
     role: TransportRole,
 ) -> Peer {
+    spawn_peer_with_injector(cfg, scr, session, role, |_, injector| Box::new(injector))
+}
+
+fn spawn_peer_with_injector(
+    cfg: SessionConfig,
+    scr: Vec<ScreenInfo>,
+    session: Session,
+    role: TransportRole,
+    make_injector: impl FnOnce(FakeCaptureHandle, FakeInjector) -> Box<dyn InputInjector>,
+) -> Peer {
     let (capture, capture_handle) = FakeCapture::new();
     let (injector, injector_handle) = FakeInjector::new();
     let (clipboard, clipboard_handle) = FakeClipboard::new();
     let backends = Backends {
         capture: Box::new(capture),
-        injector: Box::new(injector),
+        injector: make_injector(capture_handle.clone(), injector),
         screens: Box::new(FakeScreens(scr)),
         clipboard: Some(Box::new(clipboard)),
     };
@@ -120,6 +131,68 @@ fn spawn_peer(
         injector: injector_handle,
         clipboard: clipboard_handle,
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn injection_does_not_block_the_capture_callback() {
+    struct HookCheckingInjector {
+        backend: FakeInjector,
+        probe: Option<(FakeCaptureHandle, tokio::sync::oneshot::Sender<bool>)>,
+    }
+
+    impl InputInjector for HookCheckingInjector {
+        fn inject(&mut self, cmd: InjectCommand) -> Result<(), PlatformError> {
+            if let Some((capture, result)) = self.probe.take() {
+                let (done, callback) = std::sync::mpsc::channel();
+                std::thread::spawn(move || {
+                    capture.emit(mv(100.0, 100.0));
+                    let _ = done.send(());
+                });
+                // Model a system injection waiting for a capture hook to return.
+                let _ = result.send(callback.recv_timeout(Duration::from_secs(1)).is_ok());
+            }
+            self.backend.inject(cmd)
+        }
+    }
+
+    let (a_session, b_session) = sessions(
+        kvm_hello(&mac_cfg(), screens(1440, 900)),
+        kvm_hello(&win_cfg(), screens(1920, 1080)),
+    )
+    .await;
+    let a = spawn_peer(
+        mac_cfg(),
+        screens(1440, 900),
+        a_session,
+        TransportRole::Dialer,
+    );
+    let (result, callback) = tokio::sync::oneshot::channel();
+    let b = spawn_peer_with_injector(
+        win_cfg(),
+        screens(1920, 1080),
+        b_session,
+        TransportRole::Listener,
+        |capture, backend| {
+            Box::new(HookCheckingInjector {
+                backend,
+                probe: Some((capture, result)),
+            })
+        },
+    );
+    assert!(!a.capture.emit(mv(1439.5, 450.0)));
+    let callback_returned = tokio::time::timeout(T, callback).await.unwrap().unwrap();
+    a.handle.shutdown();
+    b.handle.shutdown();
+    tokio::time::timeout(T, async {
+        a.handle.join().await;
+        b.handle.join().await;
+    })
+    .await
+    .unwrap();
+    assert!(
+        callback_returned,
+        "injection held the capture callback's lock"
+    );
 }
 
 /// Connects the two QUIC sessions: (dialer side A, listener side B).
