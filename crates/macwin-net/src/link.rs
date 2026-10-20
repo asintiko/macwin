@@ -899,11 +899,17 @@ async fn read_clipboard(
 }
 
 /// Reads a protobuf varint length prefix.
-async fn read_len(recv: &mut RecvStream) -> io::Result<u64> {
+async fn read_len(recv: &mut (impl AsyncRead + Unpin)) -> io::Result<u64> {
     let mut len: u64 = 0;
     for i in 0..10 {
         let mut byte = [0u8; 1];
-        recv.read_exact(&mut byte).await.map_err(io::Error::other)?;
+        recv.read_exact(&mut byte).await?;
+        if i == 9 && byte[0] > 1 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "overflowing varint",
+            ));
+        }
         len |= u64::from(byte[0] & 0x7F) << (7 * i);
         if byte[0] & 0x80 == 0 {
             return Ok(len);
@@ -1004,6 +1010,41 @@ mod tests {
     use macwin_core::msg::{Leave, Ping};
 
     use super::*;
+
+    #[tokio::test]
+    async fn file_header_length_accepts_valid_varints() {
+        let maximum = [0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 1];
+        for (prefix, expected) in [
+            (&[0][..], 0),
+            (&[0xac, 2][..], 300),
+            (
+                &[0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0][..],
+                0,
+            ),
+            (&maximum[..], u64::MAX),
+        ] {
+            let bytes = [prefix, &[42]].concat();
+            let mut reader = bytes.as_slice();
+            assert_eq!(read_len(&mut reader).await.unwrap(), expected);
+            assert_eq!(reader, &[42], "the body must remain unread");
+        }
+    }
+
+    #[tokio::test]
+    async fn file_header_length_rejects_overflow_and_continuation() {
+        for last in [2, 0x7f, 0x80, 0x81, 0xff] {
+            let mut bytes = [0x80; 10];
+            bytes[9] = last;
+            let error = read_len(&mut bytes.as_slice()).await.unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        }
+    }
+
+    #[tokio::test]
+    async fn file_header_length_rejects_incomplete_prefix() {
+        let error = read_len(&mut &[0x80][..]).await.unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
+    }
 
     #[tokio::test]
     async fn memory_pair_round_trip_and_single_close() {
