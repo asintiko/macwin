@@ -725,6 +725,7 @@ mod tests {
     fn the_shared_view_changes_version_only_on_change() {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let shared = TrayShared::new(tx, false);
+        shared.set_legacy_side_editable(true);
         let v0 = shared.version();
         let s = paired(Phase::Listening, Some(Side::Left));
         shared.publish(&s);
