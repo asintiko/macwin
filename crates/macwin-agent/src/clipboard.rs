@@ -174,6 +174,24 @@ fn write(backend: &dyn ClipboardBackend, content: &ClipboardWrite) -> Result<u64
     }
 }
 
+/// Tries to send the newest pending event without blocking the worker.
+fn flush_pending(
+    events: &mpsc::Sender<LocalClipboard>,
+    pending: &mut Option<LocalClipboard>,
+) -> bool {
+    let Some(local) = pending.take() else {
+        return true;
+    };
+    match events.try_send(local) {
+        Ok(()) => true,
+        Err(mpsc::error::TrySendError::Full(local)) => {
+            *pending = Some(local);
+            true
+        }
+        Err(mpsc::error::TrySendError::Closed(_)) => false,
+    }
+}
+
 /// `first`, or the newest command queued behind it: only the last of
 /// several writes matters, and a stop wins over writes.
 fn newest(
@@ -200,11 +218,13 @@ fn run(
 ) {
     let mut seen = baseline;
     let mut last_image = LastImage::default();
+    let mut pending = None;
     loop {
         match newest(&commands, commands.recv_timeout(poll)) {
             Ok(Command::Write(content)) => match write(backend.as_ref(), &content) {
                 Ok(count) => {
                     seen = count;
+                    pending = None;
                     if let ClipboardWrite::Image(png) = &content {
                         last_image.remember(png);
                     }
@@ -221,27 +241,31 @@ fn run(
                 continue;
             }
         };
-        if count == seen {
-            continue;
-        }
-        match backend.snapshot(&limits.snapshot) {
-            Ok(snap) => {
-                seen = snap.change_count;
-                let local = to_local(snap.content, limits.max_files_bytes, &mut last_image);
-                if events.blocking_send(local).is_err() {
-                    return;
+        if count != seen {
+            match backend.snapshot(&limits.snapshot) {
+                Ok(snap) => {
+                    seen = snap.change_count;
+                    pending = Some(to_local(
+                        snap.content,
+                        limits.max_files_bytes,
+                        &mut last_image,
+                    ));
+                }
+                Err(e) => {
+                    warn!(error = %e, "cannot read the clipboard");
+                    continue;
                 }
             }
-            Err(e) => {
-                seen = count;
-                warn!(error = %e, "cannot read the clipboard");
-            }
+        }
+        if !flush_pending(&events, &mut pending) {
+            return;
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Instant;
 
     use macwin_platform::testing::{FakeClipboard, FakeWrite};
@@ -267,6 +291,177 @@ mod tests {
             .await
             .expect("no clipboard event")
             .expect("worker gone")
+    }
+
+    struct TestClipboardBackend {
+        backend: FakeClipboard,
+        snapshot_calls: std_mpsc::Sender<()>,
+        failures: AtomicUsize,
+        snapshot_gate: Option<std::sync::Mutex<Option<std_mpsc::Receiver<()>>>>,
+    }
+
+    impl TestClipboardBackend {
+        fn new(
+            backend: FakeClipboard,
+            failures: usize,
+            gate: Option<std_mpsc::Receiver<()>>,
+        ) -> (TestClipboardBackend, std_mpsc::Receiver<()>) {
+            let (snapshot_calls, snapshots) = std_mpsc::channel();
+            (
+                TestClipboardBackend {
+                    backend,
+                    snapshot_calls,
+                    failures: AtomicUsize::new(failures),
+                    snapshot_gate: gate.map(|rx| std::sync::Mutex::new(Some(rx))),
+                },
+                snapshots,
+            )
+        }
+    }
+
+    impl ClipboardBackend for TestClipboardBackend {
+        fn change_count(&self) -> Result<u64, PlatformError> {
+            self.backend.change_count()
+        }
+
+        fn inspect(&self) -> Result<macwin_platform::ClipboardInfo, PlatformError> {
+            self.backend.inspect()
+        }
+
+        fn read_text(&self) -> Result<Option<String>, PlatformError> {
+            self.backend.read_text()
+        }
+
+        fn snapshot(
+            &self,
+            limits: &SnapshotLimits,
+        ) -> Result<macwin_platform::ClipboardSnapshot, PlatformError> {
+            let _ = self.snapshot_calls.send(());
+            if let Some(release) = self
+                .snapshot_gate
+                .as_ref()
+                .and_then(|gate| gate.lock().unwrap().take())
+            {
+                let _ = release.recv();
+            }
+            if self
+                .failures
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
+                .is_ok()
+            {
+                return Err(PlatformError::Backend("temporary snapshot failure".into()));
+            }
+            self.backend.snapshot(limits)
+        }
+
+        fn write_text(&self, text: &str) -> Result<u64, PlatformError> {
+            self.backend.write_text(text)
+        }
+
+        fn write_image(&self, png: &[u8]) -> Result<u64, PlatformError> {
+            self.backend.write_image(png)
+        }
+
+        fn write_files(&self, paths: &[PathBuf]) -> Result<u64, PlatformError> {
+            self.backend.write_files(paths)
+        }
+    }
+
+    #[test]
+    fn full_event_queue_retries_only_the_latest_pending_event() {
+        let (events, mut rx) = mpsc::channel(EVENT_QUEUE);
+        for i in 0..EVENT_QUEUE {
+            events
+                .try_send(LocalClipboard::Text(format!("queued-{i}")))
+                .unwrap();
+        }
+
+        let mut pending = Some(LocalClipboard::Text("superseded".into()));
+        assert!(flush_pending(&events, &mut pending));
+        assert_eq!(pending, Some(LocalClipboard::Text("superseded".into())));
+        pending = Some(LocalClipboard::Text("latest".into()));
+        assert!(flush_pending(&events, &mut pending));
+        assert_eq!(pending, Some(LocalClipboard::Text("latest".into())));
+
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            LocalClipboard::Text("queued-0".into())
+        );
+        assert!(flush_pending(&events, &mut pending));
+        assert_eq!(pending, None);
+        let mut remaining = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            remaining.push(event);
+        }
+        assert_eq!(remaining.len(), EVENT_QUEUE);
+        assert_eq!(
+            remaining.last(),
+            Some(&LocalClipboard::Text("latest".into()))
+        );
+    }
+
+    #[tokio::test]
+    async fn stop_does_not_block_on_a_full_event_queue() {
+        let (cb, user) = FakeClipboard::new();
+        let (release_tx, release_rx) = std_mpsc::channel();
+        let (backend, snapshots) = TestClipboardBackend::new(cb, 0, Some(release_rx));
+        let baseline = backend.change_count().unwrap();
+        let (commands, command_rx) = std_mpsc::channel();
+        let (events, mut rx) = mpsc::channel(EVENT_QUEUE);
+        for i in 0..EVENT_QUEUE {
+            events
+                .try_send(LocalClipboard::Text(format!("queued-{i}")))
+                .unwrap();
+        }
+        let join = thread::Builder::new()
+            .name("test-macwin-clipboard".into())
+            .spawn(move || {
+                run(
+                    Box::new(backend),
+                    baseline,
+                    limits(),
+                    POLL,
+                    command_rx,
+                    events,
+                )
+            })
+            .unwrap();
+        let mut worker = ClipboardWorker {
+            commands,
+            join: Some(join),
+        };
+        user.copy_text("latest");
+        let snapshot_started = snapshots.recv_timeout(Duration::from_secs(5)).is_ok();
+
+        worker.commands.send(Command::Stop).unwrap();
+        let (stopped_tx, stopped_rx) = std_mpsc::channel();
+        let stopper = thread::spawn(move || {
+            worker.stop();
+            let _ = stopped_tx.send(());
+        });
+        let _ = release_tx.send(());
+        let stopped = stopped_rx.recv_timeout(Duration::from_secs(5)).is_ok();
+        if !stopped {
+            rx.close();
+        }
+        stopper.join().unwrap();
+
+        assert!(snapshot_started, "worker did not reach the gated snapshot");
+        assert!(stopped, "stop waited on the full clipboard event queue");
+    }
+
+    #[tokio::test]
+    async fn retries_snapshot_failure_without_a_new_change_count() {
+        let (cb, user) = FakeClipboard::new();
+        let (backend, snapshots) = TestClipboardBackend::new(cb, 1, None);
+        let (mut worker, mut rx) =
+            ClipboardWorker::start(Box::new(backend), limits(), POLL).unwrap();
+        user.copy_text("retry me");
+
+        assert!(snapshots.recv_timeout(Duration::from_secs(5)).is_ok());
+        assert!(snapshots.recv_timeout(Duration::from_secs(5)).is_ok());
+        assert_eq!(next(&mut rx).await, LocalClipboard::Text("retry me".into()));
+        worker.stop();
     }
 
     #[tokio::test]
