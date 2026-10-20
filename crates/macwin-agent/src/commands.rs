@@ -220,15 +220,35 @@ pub async fn pair(args: PairArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
+const CONFIG_WRITE_BUSY: &str =
+    "MacWin is running; quit the tray/app or stop `macwin run` before changing the config";
+
+fn with_config_write_lock<T>(
+    lock_dir: &Path,
+    write: impl FnOnce() -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    let _lock = instance::acquire(lock_dir)?.context(CONFIG_WRITE_BUSY)?;
+    write()
+}
+
+fn unpair_with_dirs(config_dir: &Path, lock_dir: &Path) -> anyhow::Result<Option<String>> {
+    with_config_write_lock(lock_dir, || {
+        let mut config = Config::load(config_dir)?;
+        let Some(peer) = config.peer.take() else {
+            return Ok(None);
+        };
+        let name = peer.name;
+        config.save(config_dir)?;
+        Ok(Some(name))
+    })
+}
+
 pub fn unpair() -> anyhow::Result<()> {
     let dir = config_dir(|k| std::env::var_os(k))?;
-    let mut config = Config::load(&dir)?;
-    match config.peer.take() {
+    let lock_dir = cache_dir()?;
+    match unpair_with_dirs(&dir, &lock_dir)? {
         None => println!("not paired"),
-        Some(p) => {
-            config.save(&dir)?;
-            println!("forgot \"{}\"; run `macwin unpair` there as well", p.name);
-        }
+        Some(name) => println!("forgot \"{name}\"; run `macwin unpair` there as well"),
     }
     Ok(())
 }
@@ -243,11 +263,23 @@ pub fn config_show() -> anyhow::Result<()> {
 
 pub fn config_set(key: &str, value: &str) -> anyhow::Result<()> {
     let dir = config_dir(|k| std::env::var_os(k))?;
-    let mut config = Config::load(&dir)?;
-    config.set(key, value)?;
-    config.save(&dir)?;
+    let lock_dir = cache_dir()?;
+    config_set_with_dirs(&dir, &lock_dir, key, value)?;
     println!("{key} = {value}");
     Ok(())
+}
+
+fn config_set_with_dirs(
+    config_dir: &Path,
+    lock_dir: &Path,
+    key: &str,
+    value: &str,
+) -> anyhow::Result<()> {
+    with_config_write_lock(lock_dir, || {
+        let mut config = Config::load(config_dir)?;
+        config.set(key, value)?;
+        config.save(config_dir)
+    })
 }
 
 pub fn autostart(action: AutostartArg) -> anyhow::Result<()> {
@@ -1071,5 +1103,77 @@ pub async fn spike_kvm(args: SpikeKvmArgs) -> anyhow::Result<()> {
     match end {
         SessionEnd::Shutdown | SessionEnd::EmergencyStop | SessionEnd::PeerClosed => Ok(()),
         other => Err(anyhow!("the session failed: {other:?}")),
+    }
+}
+
+#[cfg(test)]
+mod config_write_lock_tests {
+    use std::path::Path;
+
+    use macwin_core::types::{Os, Side};
+
+    use crate::config::{Config, PeerConfig};
+    use crate::instance;
+
+    use super::{
+        CONFIG_WRITE_BUSY, config_set_with_dirs, unpair_with_dirs, with_config_write_lock,
+    };
+
+    fn paired_config() -> Config {
+        Config {
+            peer: Some(PeerConfig {
+                fingerprint: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+                    .parse()
+                    .unwrap(),
+                name: "peer".into(),
+                os: Os::Windows,
+                side: Some(Side::Right),
+                address: None,
+            }),
+            ..Config::default()
+        }
+    }
+
+    fn save_paired_config(dir: &Path) -> Config {
+        let config = paired_config();
+        config.save(dir).unwrap();
+        config
+    }
+
+    #[test]
+    fn lifecycle_cli_mutations_refuse_while_running() {
+        let config_dir = tempfile::tempdir().unwrap();
+        let lock_dir = tempfile::tempdir().unwrap();
+        let original = save_paired_config(config_dir.path());
+        let _lock = instance::acquire(lock_dir.path()).unwrap().unwrap();
+
+        let error = unpair_with_dirs(config_dir.path(), lock_dir.path()).unwrap_err();
+        assert!(error.to_string().contains("quit the tray/app"));
+        assert!(error.to_string().contains("stop `macwin run`"));
+        let error =
+            config_set_with_dirs(config_dir.path(), lock_dir.path(), "remap", "off").unwrap_err();
+        assert!(error.to_string().contains(CONFIG_WRITE_BUSY));
+        assert_eq!(Config::load(config_dir.path()).unwrap(), original);
+    }
+
+    #[test]
+    fn lifecycle_cli_mutations_hold_the_lock_and_work_when_idle() {
+        let config_dir = tempfile::tempdir().unwrap();
+        let lock_dir = tempfile::tempdir().unwrap();
+        save_paired_config(config_dir.path());
+
+        with_config_write_lock(lock_dir.path(), || {
+            assert!(instance::acquire(lock_dir.path()).unwrap().is_none());
+            Ok(())
+        })
+        .unwrap();
+
+        config_set_with_dirs(config_dir.path(), lock_dir.path(), "remap", "off").unwrap();
+        assert!(!Config::load(config_dir.path()).unwrap().remap);
+        assert_eq!(
+            unpair_with_dirs(config_dir.path(), lock_dir.path()).unwrap(),
+            Some("peer".into())
+        );
+        assert!(Config::load(config_dir.path()).unwrap().peer.is_none());
     }
 }
