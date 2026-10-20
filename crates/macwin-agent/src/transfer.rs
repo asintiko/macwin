@@ -82,8 +82,36 @@ fn is_executable(_meta: &std::fs::Metadata) -> bool {
     false
 }
 
+fn collect_children(
+    children: impl Iterator<Item = io::Result<std::fs::DirEntry>>,
+    remaining: usize,
+) -> Result<Vec<std::fs::DirEntry>, ManifestError> {
+    let unreadable = |_| ManifestError::Unsendable("a folder cannot be read");
+    let mut collected = Vec::new();
+    for child in children {
+        let child = child.map_err(unreadable)?;
+        child
+            .file_name()
+            .into_string()
+            .map_err(|_| ManifestError::Unsendable("a name is not valid Unicode"))?;
+        let file_type = child
+            .file_type()
+            .map_err(|_| ManifestError::Unsendable("an item cannot be read"))?;
+        if file_type.is_symlink() || (!file_type.is_file() && !file_type.is_dir()) {
+            continue;
+        }
+        if collected.len() >= remaining {
+            return Err(ManifestError::TooMany);
+        }
+        collected.push(child);
+    }
+    collected.sort_by_key(|child| child.file_name());
+    Ok(collected)
+}
+
 struct Walker {
     max_bytes: u64,
+    entry_limit: usize,
     total: u64,
     /// Upper bound of the encoded header so far.
     header_bytes: usize,
@@ -94,7 +122,7 @@ struct Walker {
 impl Walker {
     fn push(&mut self, entry: FileEntry, source: PathBuf) -> Result<(), ManifestError> {
         self.header_bytes += entry.path.len() + ENTRY_OVERHEAD;
-        if self.entries.len() >= MAX_FILE_ENTRIES || self.header_bytes > MAX_FILES_HEADER {
+        if self.entries.len() >= self.entry_limit || self.header_bytes > MAX_FILES_HEADER {
             return Err(ManifestError::TooMany);
         }
         self.entries.push(entry);
@@ -126,12 +154,10 @@ impl Walker {
                 mtime_ms: mtime_ms(&meta),
             };
             self.push(entry, path.clone())?;
-            let unreadable = |_| ManifestError::Unsendable("a folder cannot be read");
-            let mut children = std::fs::read_dir(&path)
-                .map_err(unreadable)?
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(unreadable)?;
-            children.sort_by_key(|c| c.file_name());
+            let remaining = self.entry_limit - self.entries.len();
+            let children = std::fs::read_dir(&path)
+                .map_err(|_| ManifestError::Unsendable("a folder cannot be read"))?;
+            let children = collect_children(children, remaining)?;
             for child in children {
                 let name = child
                     .file_name()
@@ -163,8 +189,17 @@ impl Walker {
 /// recursively). Each root keeps its own name; two roots with the same name
 /// get " (2)" and so on.
 pub fn build_manifest(roots: &[PathBuf], max_bytes: u64) -> Result<LocalFiles, ManifestError> {
+    build_manifest_with_entry_limit(roots, max_bytes, MAX_FILE_ENTRIES)
+}
+
+fn build_manifest_with_entry_limit(
+    roots: &[PathBuf],
+    max_bytes: u64,
+    entry_limit: usize,
+) -> Result<LocalFiles, ManifestError> {
     let mut walker = Walker {
         max_bytes,
+        entry_limit,
         total: 0,
         header_bytes: 0,
         entries: Vec::new(),
@@ -564,6 +599,48 @@ mod tests {
             Err(ManifestError::TooLarge { bytes: 70_005 })
         );
         assert_eq!(build_manifest(&[], 10), Err(ManifestError::Empty));
+    }
+
+    #[test]
+    fn directory_collection_stops_at_the_first_excess_entry() {
+        let t = tempfile::tempdir().unwrap();
+        for name in ["a", "b", "c", "d"] {
+            fs::write(t.path().join(name), b"").unwrap();
+        }
+        let mut visited = 0;
+        let children = fs::read_dir(t.path()).unwrap().inspect(|_| visited += 1);
+        assert!(matches!(
+            collect_children(children, 1),
+            Err(ManifestError::TooMany)
+        ));
+        assert_eq!(visited, 2);
+    }
+
+    #[test]
+    fn manifest_bounds_collected_children_at_the_remaining_entry_limit() {
+        let t = tempfile::tempdir().unwrap();
+        let dir = t.path().join("folder");
+        fs::create_dir(&dir).unwrap();
+        fs::write(dir.join("b.txt"), b"b").unwrap();
+        fs::write(dir.join("a.txt"), b"a").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(dir.join("a.txt"), dir.join("link")).unwrap();
+
+        let roots = [dir.clone()];
+        let files = build_manifest_with_entry_limit(&roots, 10, 3).unwrap();
+        let paths: Vec<&str> = files
+            .entries
+            .iter()
+            .map(|entry| entry.path.as_str())
+            .collect();
+        assert_eq!(paths, ["folder", "folder/a.txt", "folder/b.txt"]);
+        assert_eq!(files.total_bytes(), 2);
+
+        fs::write(dir.join("c.txt"), b"c").unwrap();
+        assert_eq!(
+            build_manifest_with_entry_limit(&roots, 10, 3),
+            Err(ManifestError::TooMany)
+        );
     }
 
     #[test]
