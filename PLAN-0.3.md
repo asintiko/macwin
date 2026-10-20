@@ -18,7 +18,7 @@
 | A.6 | Согласовать удерживаемые клавиши при синтетических Fn/gesture chords и переходе в Controlled | 🔄 |
 | A.7 | Отклонять переполнение и продолжение varint длины frame в десятом байте | ✅ |
 | A.8 | Запрещать CLI read-modify-write конфига, пока активен tray/run | ✅ 🧪 |
-| A.9 | Согласовать legacy Left/Right с ролью и явной arrangement | 🔄 |
+| A.9 | Согласовать legacy Left/Right с ролью и явной arrangement | ✅ 🧪 |
 | A.10 | Отклонять переполнение varint длины заголовка файлового потока | ✅ |
 
 Автотесты с fake-backend и loopback QUIC не подтверждают поведение системных хуков, курсора, жестов и Fn на реальных Mac и Windows. Для пунктов с 🧪 остаётся проверка по [FIRST_RUN.md](FIRST_RUN.md).

@@ -244,6 +244,10 @@ fn icon(phase: &Phase) -> TrayIcon {
 
 /// The view of `s`: icon, tooltip, menu and notice.
 pub fn render(s: &TrayState) -> TrayView {
+    render_with_legacy_side(s, true)
+}
+
+fn render_with_legacy_side(s: &TrayState, legacy_side_editable: bool) -> TrayView {
     let status = status_line(s);
     let mut menu = vec![MenuEntry::Label(status.clone())];
     match &s.phase {
@@ -287,7 +291,7 @@ pub fn render(s: &TrayState) -> TrayView {
             .enabled(!quitting)
             .checked(s.clipboard),
     ));
-    if s.peer.is_some() {
+    if s.peer.is_some() && legacy_side_editable {
         let editable = !pairing && !quitting;
         menu.push(MenuEntry::Item(
             MenuItem::new(ID_SIDE_LEFT, "Other computer is on the left")
@@ -405,6 +409,7 @@ pub struct TrayShared {
     stats: Mutex<(u64, Option<SessionStats>)>,
     commands: mpsc::UnboundedSender<UiCommand>,
     finished: AtomicBool,
+    legacy_side_editable: AtomicBool,
     /// The app window is up: the tray shows the window-mode menu.
     window: AtomicBool,
     /// Wakes the window after a change.
@@ -420,6 +425,7 @@ impl TrayShared {
             stats: Mutex::new((0, None)),
             commands,
             finished: AtomicBool::new(false),
+            legacy_side_editable: AtomicBool::new(false),
             window: AtomicBool::new(window),
             waker: Mutex::new(None),
             opener: Mutex::new(None),
@@ -457,6 +463,17 @@ impl TrayShared {
         if changed {
             self.wake();
         }
+    }
+
+    fn set_legacy_side_editable(&self, editable: bool) {
+        if self.legacy_side_editable.swap(editable, Ordering::AcqRel) != editable {
+            self.lock().0 += 1;
+            self.wake();
+        }
+    }
+
+    fn legacy_side_editable(&self) -> bool {
+        self.legacy_side_editable.load(Ordering::Acquire)
     }
 
     /// Asks the controller to stop sharing and finish (Ctrl+C, logout).
@@ -531,7 +548,7 @@ impl TrayApp for TrayShared {
         if window {
             render_window(&p.1)
         } else {
-            render(&p.1)
+            render_with_legacy_side(&p.1, self.legacy_side_editable())
         }
     }
 
@@ -626,6 +643,23 @@ mod tests {
         let code = item(&v, ID_PAIR_CODE).unwrap();
         assert!(code.input.is_some() && item(&v, ID_PAIR_WAIT).unwrap().input.is_none());
         assert!(items(&v).iter().all(|i| i.id != 0));
+    }
+
+    #[test]
+    fn lifecycle_legacy_side_controls_follow_shared_availability() {
+        let state = paired(Phase::Connected(RoleKind::Idle), Some(Side::Right));
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let shared = TrayShared::new(tx, false);
+        shared.publish(&state);
+        shared.set_legacy_side_editable(true);
+        assert!(item(&shared.view(), ID_SIDE_RIGHT).is_some());
+
+        let version = shared.version();
+        shared.set_legacy_side_editable(false);
+        assert!(shared.version() > version);
+        let v = shared.view();
+        assert!(item(&v, ID_SIDE_LEFT).is_none());
+        assert!(item(&v, ID_SIDE_RIGHT).is_none());
     }
 
     #[test]

@@ -154,8 +154,21 @@ pub fn start(env: TrayEnv) -> (Arc<TrayShared>, impl Future<Output = ()> + Send 
 }
 
 fn set_side(c: &mut Config, side: Side) -> anyhow::Result<()> {
+    c.peer.as_ref().context("not paired")?;
+    if !legacy_side_editable(c) {
+        anyhow::bail!("the legacy side is not effective for this role or arrangement");
+    }
     c.peer.as_mut().context("not paired")?.side = Some(side);
     Ok(())
+}
+
+fn legacy_side_editable(c: &Config) -> bool {
+    c.peer.is_some()
+        && match c.role {
+            Some(Role::Secondary) => false,
+            Some(Role::Primary) => c.arrangement.is_none(),
+            None => true,
+        }
 }
 
 /// The placement the window shows: the primary's own (the legacy side
@@ -334,12 +347,15 @@ impl Controller {
                     remap: c.remap,
                     discovery: c.discovery,
                 };
+                self.shared
+                    .set_legacy_side_editable(legacy_side_editable(&c));
                 if c.peer.is_none() {
                     self.state.peer_screens.clear();
                 }
                 Some(c)
             }
             Err(e) => {
+                self.shared.set_legacy_side_editable(false);
                 self.fail(format!("{e:#}"));
                 None
             }
@@ -496,8 +512,13 @@ impl Controller {
                 })
                 .await
             }
-            ID_SIDE_LEFT => self.update_config(|c| set_side(c, Side::Left)).await,
-            ID_SIDE_RIGHT => self.update_config(|c| set_side(c, Side::Right)).await,
+            ID_SIDE_LEFT if self.pairing.is_none() && self.shared.legacy_side_editable() => {
+                self.update_config(|c| set_side(c, Side::Left)).await
+            }
+            ID_SIDE_RIGHT if self.pairing.is_none() && self.shared.legacy_side_editable() => {
+                self.update_config(|c| set_side(c, Side::Right)).await
+            }
+            ID_SIDE_LEFT | ID_SIDE_RIGHT => {}
             ID_PAIR_WAIT => self.pair_here().await,
             ID_PAIR_CANCEL if self.pairing.is_some() => {
                 self.cancel_pairing();
@@ -929,7 +950,69 @@ fn language_of(lang: macwin_ui::Lang) -> Language {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_pair_entry;
+    use std::path::Path;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use macwin_core::arrange::{Edge, Placement};
+    use macwin_core::types::{Os, Side};
+    use macwin_net::Identity;
+    use tokio::sync::mpsc;
+
+    use crate::config::{Config, PeerConfig, Role};
+
+    use super::super::{ID_SIDE_LEFT, TrayShared, TrayState};
+    use super::{Controller, TrayEnv, legacy_side_editable, parse_pair_entry, set_side};
+
+    fn paired_config(role: Option<Role>, arrangement: Option<Placement>) -> Config {
+        Config {
+            peer: Some(PeerConfig {
+                fingerprint: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+                    .parse()
+                    .unwrap(),
+                name: "peer".into(),
+                os: Os::Windows,
+                side: Some(Side::Right),
+                address: None,
+            }),
+            role,
+            arrangement,
+            ..Config::default()
+        }
+    }
+
+    fn test_controller(config_dir: &Path) -> Controller {
+        let (ui_tx, _ui_rx) = mpsc::unbounded_channel();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        Controller {
+            env: TrayEnv {
+                config_dir: config_dir.to_path_buf(),
+                identity: Identity::generate().unwrap(),
+                os: Os::MacOs,
+                device_name: "local".into(),
+                staging: config_dir.join("incoming"),
+                make_backends: Arc::new(|_| unreachable!("not called in this test")),
+                autostart: None,
+                discovery_targets: Arc::new(|_| Vec::new()),
+                discovery_wait: Duration::ZERO,
+                retry_min: Duration::ZERO,
+                retry_max: Duration::ZERO,
+                connect_timeout: Duration::ZERO,
+                window: false,
+                screens: Arc::new(|| Vec::new()),
+                permissions: None,
+            },
+            shared: Arc::new(TrayShared::new(ui_tx, false)),
+            tx,
+            tag: 0,
+            runner: None,
+            pairing: None,
+            paused: false,
+            state: TrayState::default(),
+            notices: 0,
+            quit: false,
+        }
+    }
 
     #[test]
     fn pairing_entry_preserves_supported_code_formats() {
@@ -954,5 +1037,72 @@ mod tests {
         for input in ["", "123", "127.0.0.1", "127.0.0.1 123456 extra"] {
             assert!(parse_pair_entry(input).is_err(), "{input:?}");
         }
+    }
+
+    #[test]
+    fn lifecycle_side_selection_only_edits_effective_legacy_placement() {
+        let mut legacy = paired_config(Some(Role::Primary), None);
+        assert!(legacy_side_editable(&legacy));
+        set_side(&mut legacy, Side::Left).unwrap();
+        assert_eq!(
+            legacy.session_placement().unwrap(),
+            Some(Placement::side(Side::Left))
+        );
+
+        let placement = Placement {
+            display: Some(3),
+            edge: Edge::Top,
+            offset: Some(75),
+        };
+        for mut config in [
+            paired_config(Some(Role::Primary), Some(placement)),
+            paired_config(Some(Role::Secondary), None),
+        ] {
+            let before = config.clone();
+            assert!(!legacy_side_editable(&config));
+            assert!(set_side(&mut config, Side::Left).is_err());
+            assert_eq!(config, before);
+        }
+    }
+
+    #[test]
+    fn lifecycle_controller_publishes_legacy_side_availability() {
+        let placement = Placement {
+            display: Some(3),
+            edge: Edge::Top,
+            offset: Some(75),
+        };
+        for (role, arrangement, expected) in [
+            (None, None, true),
+            (Some(Role::Primary), None, true),
+            (Some(Role::Primary), Some(placement), false),
+            (Some(Role::Secondary), None, false),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            paired_config(role, arrangement).save(dir.path()).unwrap();
+            let mut controller = test_controller(dir.path());
+            controller.load_config().unwrap();
+            assert_eq!(controller.shared.legacy_side_editable(), expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn lifecycle_stale_side_click_is_ignored_for_explicit_arrangement() {
+        let placement = Placement {
+            display: Some(3),
+            edge: Edge::Top,
+            offset: Some(75),
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let config = paired_config(Some(Role::Primary), Some(placement));
+        config.save(dir.path()).unwrap();
+        let mut controller = test_controller(dir.path());
+        controller.load_config().unwrap();
+        assert!(!controller.shared.legacy_side_editable());
+
+        controller.clicked(ID_SIDE_LEFT).await;
+
+        assert!(controller.state.notice.is_none());
+        assert_eq!(Config::load(dir.path()).unwrap(), config);
     }
 }
